@@ -1,0 +1,46 @@
+{% extends 'trading/base.html' %}
+
+{% block content %}
+  <h1>Analyse</h1>
+
+  {% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+  {% else %}
+    <p>Ausgewählte Symbole: {{ selected_symbols|join:", " }}</p>
+    <p>Ausgewählter Zeitrahmen: {{ selected_timeframe }}</p>
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Signal</th>
+          <th>Fehler</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for result in analysis_results %}
+          <tr>
+            <td>{{ result.symbol }}</td>
+            <td>
+              {% if result.signal %}
+                {{ result.signal }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if result.error %}
+                <div class="alert alert-warning">{{ result.error }}</div>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="3">Keine Analyseergebnisse verfügbar.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+{% endblock %}

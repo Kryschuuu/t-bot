@@ -1,0 +1,10 @@
+{% extends "trading/base.html" %}
+{% block content %}
+<h2>Konfiguration löschen</h2>
+<p>Sind Sie sicher, dass Sie die Konfiguration <strong>{{ config.id }}</strong> inklusive aller zugehörigen Daten löschen möchten?</p>
+<form method="post">
+    {% csrf_token %}
+    <button type="submit" class="btn btn-danger">Ja, löschen</button>
+    <a href="{% url 'config_list' %}" class="btn btn-secondary">Abbrechen</a>
+</form>
+{% endblock %}

@@ -1,0 +1,264 @@
+{% extends "trading/base.html" %}
+{% load static %}
+{% load my_filters %}
+
+{% block content %}
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest Report #{{ task.id }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        h2 {
+            color: #555;
+            margin-top: 20px;
+        }
+        h3 {
+            color: #666;
+            margin-top: 15px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        .symbol-section {
+            margin-top: 30px;
+        }
+        .plot {
+            width: 100%;
+            max-height: 400px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Backtest Report für Task #{{ task.id }}</h1>
+
+    <!-- Infotafel -->
+    <div class="section">
+        <h2>Backtest-Informationen</h2>
+        <table>
+            <tr>
+                <th>Konfiguration</th>
+                <td>{{ config.id }} - {{ config.user.username }}</td>
+            </tr>
+            <tr>
+                <th>Exchange</th>
+                <td>{{ config.exchange }}</td>
+            </tr>
+            <tr>
+                <th>Symbole</th>
+                <td>{{ task.symbol }}</td>
+            </tr>
+            <tr>
+                <th>Zeitraum</th>
+                <td>{{ task.result.start_time }} bis {{ task.result.end_time }}</td>
+            </tr>
+            <tr>
+                <th>Dauer</th>
+                <td>{{ task.result.duration }} Sekunden</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Globale Ergebnisse -->
+    <div class="section">
+        <h2>Globale Ergebnisse</h2>
+        <table>
+            <tr>
+                <th>Gesamttrades</th>
+                <td>{{ task.result.global_results.total_trades }}</td>
+            </tr>
+            <tr>
+                <th>Gesamtprofit</th>
+                <td>{{ task.result.global_results.total_profit|floatformat:2 }} USDT</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Diagramme -->
+    <div class="section">
+        <h2>Diagramme</h2>
+        <!-- Trades pro Symbol -->
+        <h3>Trades pro Symbol</h3>
+        <div class="plot">
+            {{ plots.trades_per_symbol|safe }}
+        </div>
+        <!-- Kumulativer Profitverlauf -->
+        <h3>Kumulativer Profitverlauf</h3>
+        <div class="plot">
+            {{ plots.cumulative_profit|safe }}
+        </div>
+        <!-- Profit pro Symbol -->
+        <h3>Profit pro Symbol</h3>
+        <div class="plot">
+            {{ plots.profit_per_symbol|safe }}
+        </div>
+        <!-- Profit pro Tag -->
+        <h3>Profit pro Tag</h3>
+        <div class="plot">
+            {{ plots.profit_per_day|safe }}
+        </div>
+        <!-- Profitabilitätsübersicht pro Symbol -->
+        <h3>Profitabilitätsübersicht pro Symbol</h3>
+        <div class="plot">
+            {{ plots.profitability_per_symbol|safe }}
+        </div>
+    </div>
+
+    <!-- Allgemeine Informationen -->
+    <div class="section">
+        <h2>Allgemeine Informationen</h2>
+        <p><strong>Status:</strong> {{ task.get_status_display }}</p>
+        <p><strong>Erstellt am:</strong> {{ task.created_at }}</p>
+        <p><strong>Abgeschlossen am:</strong> {{ task.completed_at|default:"Nicht verfügbar" }}</p>
+    </div>
+
+    <!-- Backtest-Parameter -->
+    <div class="section">
+        <h2>Backtest-Parameter</h2>
+        <ul>
+            <li><strong>div_DVA_prev_NDA von:</strong> {{ task.parameters.acc_from|default:"N/A" }}</li>
+            <li><strong>div_DVA_prev_NDA bis:</strong> {{ task.parameters.acc_to|default:"N/A" }}</li>
+            <li><strong>div_DVA_prev_NDA Schritt:</strong> {{ task.parameters.acc_steps|default:"N/A" }}</li>
+            <li><strong>NDA von:</strong> {{ task.parameters.nda_from|default:"N/A" }}</li>
+            <li><strong>NDA bis:</strong> {{ task.parameters.nda_to|default:"N/A" }}</li>
+            <li><strong>NDA Schritt:</strong> {{ task.parameters.nda_steps|default:"N/A" }}</li>
+            <li><strong>Deltadelta von:</strong> {{ task.parameters.deltadelta_from|default:"N/A" }}</li>
+            <li><strong>Deltadelta bis:</strong> {{ task.parameters.deltadelta_to|default:"N/A" }}</li>
+            <li><strong>Deltadelta Schritt:</strong> {{ task.parameters.deltadelta_steps|default:"N/A" }}</li>
+        </ul>
+    </div>
+
+    <!-- Ergebnisse pro Symbol -->
+    {% if task.result.symbol_results %}
+        {% for symbol, result in task.result.symbol_results.items %}
+            <div class="symbol-section">
+                <h2>Ergebnisse für Symbol: {{ symbol }}</h2>
+
+                <!-- Beste Schwellenwerte -->
+                <div class="section">
+                    <h3>Beste Schwellenwerte</h3>
+                    <p>{{ result.optimized_thresholds_str|default:"Keine optimierten Schwellenwerte gefunden." }}</p>
+                </div>
+
+                <!-- Kapitalentwicklung -->
+                <div class="section">
+                    <h3>Kapitalentwicklung</h3>
+                    <table>
+                        <tr>
+                            <th>Startkapital</th>
+                            <td>{{ config.start_capital|floatformat:2 }} USDT</td>
+                        </tr>
+                        <tr>
+                            <th>Endkapital</th>
+                            <td>{{ result.best_capital|floatformat:2 }} USDT</td>
+                        </tr>
+                        <tr>
+                            <th>Gesamtprofit</th>
+                            <td>{{ result.best_capital|sub:config.start_capital|floatformat:2 }} USDT</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <!-- Trade-Statistik -->
+                <div class="section">
+                    <h3>Trade-Statistik</h3>
+                    <table>
+                        <tr>
+                            <th>Total Trades</th>
+                            <td>{{ result.report.num_trades }}</td>
+                        </tr>
+                        <tr>
+                            <th>Profitabel</th>
+                            <td>{{ result.report.profitable_trades }}</td>
+                        </tr>
+                        <tr>
+                            <th>Verluste</th>
+                            <td>{{ result.report.unprofitable_trades }}</td>
+                        </tr>
+                        <tr>
+                            <th>Win Rate</th>
+                            <td>{{ result.report.win_rate|floatformat:2 }}%</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <!-- Tradinglogbuch -->
+                <div class="section">
+                    <h3>Tradinglogbuch</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Typ</th>
+                                <th>Preis</th>
+                                <th>Zeitindex</th>
+                                <th>Kapital vorher</th>
+                                <th>Kapital nachher</th>
+                                <th>Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for trade in result.trades %}
+                                <tr>
+                                    <td>{{ trade.type|upper }}</td>
+                                    <td>{{ trade.price|floatformat:8 }}</td>
+                                    <td>{{ trade.index }}</td>
+                                    <td>{{ trade.capital_before|floatformat:4 }}</td>
+                                    <td>{{ trade.capital_after|floatformat:4 }}</td>
+                                    <td>
+                                        {% if trade.type == 'sell' %}
+                                            {{ trade.profit_percentage|floatformat:4 }}%
+                                        {% else %}
+                                            -
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Preisanalyse -->
+                {% if plots and plots|get_item:task.id and plots|get_item:task.id|get_item:symbol %}
+                    <div class="section">
+                        <h3>Preisanalyse für Symbol {{ symbol }}</h3>
+                        <div class="plot">
+                            {{ plots|get_item:task.id|get_item:symbol|safe }}
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+        {% endfor %}
+    {% else %}
+        <div class="section">
+            <h2>Keine Symbolergebnisse verfügbar</h2>
+        </div>
+    {% endif %}
+</body>
+</html>
+{% endblock %}

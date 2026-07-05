@@ -1,0 +1,18 @@
+{% extends "trading/base.html" %}
+{% block content %}
+
+<div class="container mt-4">
+    <h2>Neue Konfiguration</h2>
+    <form method="post">
+        {% csrf_token %}
+        <table class="table table-bordered table-hover">
+            <tbody>
+                {{ form.as_table }}                
+            </tbody>
+        </table>
+        <button type="submit" class="btn btn-primary">Speichern</button>
+    </form>
+    <a href="{% url 'dashboard' %}" class="btn btn-secondary mt-3">Zum Dashboard</a>
+</div>
+
+{% endblock %}

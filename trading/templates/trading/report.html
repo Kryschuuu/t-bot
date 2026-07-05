@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Trading Analyse Report - Konfiguration {{ config.id }}</title>
+    <style>
+      @page {
+        size: A4 landscape;
+        margin: 20mm;
+      }
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+        line-height: 1.6;
+      }
+      h1, h2, h3, h4 {
+        text-align: center;
+        margin-bottom: 20px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 20px 0;
+        font-size: 14px;
+      }
+      table, th, td {
+        border: 1px solid #333;
+      }
+      th, td {
+        padding: 8px;
+        text-align: center;
+      }
+      .chart {
+        text-align: center;
+        margin: 20px 0;
+      }
+      .chart img {
+        max-width: 100%;
+        height: auto;
+      }
+      .details {
+        margin: 20px 0;
+      }
+      .details p {
+        margin: 0;
+        padding: 5px 0;
+      }
+      .details strong {
+        font-weight: bold;
+      }
+      hr {
+        border: none;
+        border-top: 1px solid #333;
+        margin: 20px 0;
+      }
+    </style>
+</head>
+<body>
+    <h1>Trading Analyse Report</h1>
+    <h2>Konfiguration: {{ config.id }}</h2>
+    <div class="details">
+      <p><strong>Exchange:</strong> {{ config.exchange }}</p>
+      <p><strong>Markt:</strong> {{ config.market }}</p>
+      <p><strong>Symbole:</strong> {{ config.symbols }}</p>
+    </div>
+    <hr>
+    <h3>Allgemeine Statistiken</h3>
+    <table>
+      <tr>
+        <th>Gesamt Trades</th>
+        <th>Buy Trades</th>
+        <th>Sell Trades</th>
+        <th>Gesamter Profit</th>
+      </tr>
+      <tr>
+        <td>{{ total_trades }}</td>
+        <td>{{ buy_trades }}</td>
+        <td>{{ sell_trades }}</td>
+        <td>{{ total_profit }}</td>
+      </tr>
+    </table>
+    <h3>Profitabilitätsübersicht</h3>
+    <h4>Gesamtübersicht</h4>
+    <table>
+      <tr>
+        <th>Profit Trades</th>
+        <th>Loss Trades</th>
+      </tr>
+      <tr>
+        <td>{{ profitable_trades }}</td>
+        <td>{{ unprofitable_trades }}</td>
+      </tr>
+    </table>
+    
+    <h4>Nach Symbol</h4>
+    <table>
+      <tr>
+        <th>Symbol</th>
+        <th>Profit Trades</th>
+        <th>Loss Trades</th>
+      </tr>
+      {% for symbol, counts in symbol_profit_counts.items %}
+      <tr>
+        <td>{{ symbol }}</td>
+        <td>{{ counts.profit }}</td>
+        <td>{{ counts.loss }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    
+    <div class="chart">
+      <h3>Balkendiagramm: Profitabilitätsübersicht pro Symbol</h3>
+      <img src="data:image/png;base64,{{ profitability_chart }}" alt="Profitabilitätsübersicht">
+    </div>
+    
+    <h3>Trades nach Symbol (Häufigkeitsverteilung)</h3>
+    <table>
+      <tr>
+        <th>Symbol</th>
+        <th>Anzahl Trades</th>
+      </tr>
+      {% for symbol, count in symbol_counts.items %}
+      <tr>
+        <td>{{ symbol }}</td>
+        <td>{{ count }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    
+    <div class="chart">
+      <h3>Balkendiagramm: Trades pro Symbol</h3>
+      <img src="data:image/png;base64,{{ bar_chart }}" alt="Trades pro Symbol">
+    </div>
+    
+    <div class="chart">
+      <h3>Liniendiagramm: Kumulativer Profitverlauf</h3>
+      <img src="data:image/png;base64,{{ profit_chart }}" alt="Profitverlauf">
+    </div>
+    
+    <h3>Detailliertes Trading Logbuch</h3>
+    <table>
+      <tr>
+        <th>Datum</th>
+        <th>Uhrzeit</th>
+        <th>Symbol</th>
+        <th>Action</th>
+        <th>Price</th>
+        <th>Fee</th>
+        <th>Amount</th>
+        <th>Order ID</th>
+        <th>P/L Nominal</th>
+      </tr>
+      {% for log in logs %}
+      <tr>
+        <td>{{ log.date }}</td>
+        <td>{{ log.time }}</td>
+        <td>{{ log.symbol }}</td>
+        <td>{{ log.action }}</td>
+        <td>{{ log.price }}</td>
+        <td>{{ log.fee_amount }}</td>
+        <td>{{ log.amount }}</td>
+        <td>{{ log.order_id }}</td>
+        <td>{{ log.pl_nominal }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    
+    <h3>Weitere Analysen</h3>
+    <h4>Profit pro Symbol</h4>
+    <table>
+      <tr>
+        <th>Symbol</th>
+        <th>Gesamter Profit</th>
+      </tr>
+      {% for symbol, profit in symbol_profits.items %}
+      <tr>
+        <td>{{ symbol }}</td>
+        <td>{{ profit }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    
+    <div class="chart">
+      <h3>Balkendiagramm: Profit pro Symbol</h3>
+      <img src="data:image/png;base64,{{ profit_symbol_chart }}" alt="Profit pro Symbol">
+    </div>
+    
+    <h4>Profit pro Tag</h4>
+    <table>
+      <tr>
+        <th>Datum</th>
+        <th>Gesamter Profit</th>
+      </tr>
+      {% for date, profit in daily_profits.items %}
+      <tr>
+        <td>{{ date }}</td>
+        <td>{{ profit }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    
+    <div class="chart">
+      <h3>Balkendiagramm: Profit pro Tag</h3>
+      <img src="data:image/png;base64,{{ profit_daily_chart }}" alt="Profit pro Tag">
+    </div>
+    
+</body>
+</html>

@@ -1,0 +1,862 @@
+{% extends "trading/base.html" %}
+{% load static %}
+{% block content %}
+{% if config.is_running %}
+<div class="container mt-4">
+
+    <div class="text-center">
+        <h2>Dashboard</h2>
+    </div>
+
+    {% if config.is_running %}
+    <div class="alert alert-success text-center" role="alert">
+        Bot aktiv
+    </div>
+    {% endif %}
+    {% if config.api_key != Null %}
+    <div class="alert alert-success text-center" role="alert">
+        LIVE - HANDEL aktiv - apis vorhanden
+    </div>
+    {% endif %}
+    {% if all_configs %}
+    <div class="mb-4 text-center">
+        <h4>Wechseln Sie die Konfiguration:</h4>
+        <div class="btn-group" role="group" aria-label="Konfiguration Wechsel">
+            {% for conf in all_configs %}
+            <a href="{% url 'dashboard' %}?config_id={{ conf.id }}" class="btn btn-outline-primary {% if conf.id == config.id %}active{% endif %}">
+                Konfig {{ conf.id }}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    </div>
+        <div class="text-center mt-3">
+            <a href="{% url 'reset_log' config.id %}" class="btn btn-warning" onclick="return confirm('Möchten Sie das Logbuch wirklich zurücksetzen?');">Logbuch resetten</a>
+            <a href="{% url 'generate_report' config.id %}" class="btn btn-primary">Trading Analyse Report generieren</a>
+        </div>
+    </div>
+    <p><br></p
+    {% if config %}
+    <div class="container mt-4">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="d-flex justify-content-center">
+                    <table class="table table-bordered table-hover">
+                        <thead>
+                            <tr><th colspan="2" class="text-center">Konfiguration</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td class="text-right pr-2"><strong>Exchange:</strong></td><td>{{ config.exchange }}</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Markt:</strong></td><td>{{ config.market }}</td></tr>
+                            {% load custom_filters %}
+                            <tr>
+                                <td class="text-right pr-2"><strong>Symbole:</strong></td>
+                                <td>
+                                    {% for symbol in config.symbols|split_string:',' %}
+                                        {{ symbol|strip }}<br>
+                                    {% endfor %}
+                                </td>
+                            </tr>
+                            <tr><td class="text-right pr-2"><strong>Startkapital:</strong></td><td>{{ config.start_capital }}</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Trade Amount:</strong></td><td>{{ config.trade_amount }}</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Verkaufsstop bei:</strong></td><td>{{ config.sales_stop_threshold }}</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Take-Profit:</strong></td><td>{{ config.take_profit }}%</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Stop-Loss:</strong></td><td>{{ config.stop_loss }}%</td></tr>
+                            <tr><td class="text-right pr-2"><strong>Fee:</strong></td><td>{{ config.fee }}%</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex justify-content-center">
+                    <table class="table table-bordered table-hover" style="background-color: #e0f7fa;">
+                        <thead>
+                            <tr><th colspan="2" class="text-center">Infotafel</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Aktuelles Kapital:</strong></td>
+                                <td class="text-left"><span id="current-capital">{{ current_capital }}</span></td>
+                            </tr>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Tank (Summe P/L Nominal):</strong></td>
+                                <td class="text-left"><span id="tank">{{ tank }}</span></td>
+                            </tr>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Anzahl aktueller Buy Orders:</strong></td>
+                                <td class="text-left"><span id="buy-orders">{{ buy_orders }}</span></td>
+                            </tr>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Anzahl aktueller Sell Orders:</strong></td>
+                                <td class="text-left"><span id="sell-orders">{{ sell_orders }}</span></td>
+                            </tr>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Anzahl profitabler Verkäufe:</strong></td>
+                                <td class="text-left"><span id="profitable-sells">{{ profitable_sells }}</span></td>
+                            </tr>
+                            <tr>
+                                <td class="text-right pr-2"><strong>Anzahl unprofitabler Verkäufe:</strong></td>
+                                <td class="text-left"><span id="unprofitable-sells">{{ unprofitable_sells }}</span></td>
+                            </tr>
+                            <tr><td colspan="2" class="text-center"><strong>Performance Metriken</strong></td></tr>
+                            <tr>
+                                <td><strong>Win Rate:</strong></td>
+                                <td><span id="win-rate"></span> %</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Ø Profit / Trade:</strong></td>
+                                <td><span id="avg-profit-trade"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Ø Gewinn:</strong></td>
+                                <td><span id="avg-win"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Ø Verlust:</strong></td>
+                                <td><span id="avg-loss"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Risk/Reward:</strong></td>
+                                <td><span id="risk-reward"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Profit Faktor:</strong></td>
+                                <td><span id="profit-factor"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Größter Gewinn:</strong></td>
+                                <td><span id="biggest-win"></span></td>
+                            </tr>
+                            <tr>
+                                <td><strong>Größter Verlust:</strong></td>
+                                <td><span id="biggest-loss"></span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <table class="table table-bordered table-hover">
+                    <thead>
+                        <tr><th colspan="2" class="text-center">Risk & Performance</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Sharpe Ratio</td><td><span id="sharpe"></span></td></tr>
+                        <tr><td>Max Drawdown</td><td><span id="max-dd"></span> %</td></tr>
+                        <tr><td>Aktueller Drawdown</td><td><span id="current-dd"></span> %</td></tr>
+                    </tbody>
+                </table>
+
+                <div id="equity-curve" style="height:220px;"></div>
+            </div>
+        </div>
+    </div>
+    <div class="mb-4">
+        <div class="d-flex justify-content-center">
+            <form method="post">
+            {% csrf_token %}
+            <table class="table table-bordered table-hover">
+                <tbody>
+                    <tr>
+                        <th>Beschleunigungs-Schwellenwert für Kauf</th>
+                        <td>
+                            {{ form.div_DVA_prev_NDA_threshold_buy }}
+                            <small class="form-text text-muted">Beschleunigung > dieser Wert löst einen Kauf aus.</small>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>DeltaDelta-Schwellenwert für Kauf</th>
+                        <td>
+                            {{ form.deltadelta_threshold_buy }}
+                            <small class="form-text text-muted">DeltaDelta > dieser Wert löst einen Kauf aus.</small>
+                        </td>
+                        <th>NDA-Schwellenwert für Kauf</th>
+                        <td>
+                            {{ form.nda_threshold_buy }}
+                            <small class="form-text text-muted">nda > dieser Wert löst einen Kauf aus.</small>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            <center><button type="submit" class="btn btn-primary">Speichern</button></center>
+        </form>
+        </div>
+    </div>
+    <p><br></p>
+    <div class="mt-4">
+        <center><h4>Trading Logbuch</h4></center>
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered">
+                <thead class="table-light">
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Datum</th>
+                        <th>Uhrzeit</th>
+                        <th>Action</th>
+                        <th>Price</th>
+                        <th>Fee</th>
+                        <th>Amount</th>
+                        <th>Order ID</th>
+                        <th>P/L Nominal</th>
+                        <th>P/L Relative</th>
+                        <th>Total P/L</th>
+                        <th>Aktuelles Kapital</th>
+                        <th>Tank</th>
+                    </tr>
+                </thead>
+                <tbody id="trading-log-body">
+                    {% for log in logs %}
+                    <tr class="{% if log.action == 'buy' %}table-success{% elif log.action == 'sell' %}table-danger{% endif %}">
+                        <td>{{ log.symbol }}</td>
+                        <td>{{ log.date }}</td>
+                        <td>{{ log.time }}</td>
+                        <td>{{ log.action }}</td>
+                        <td>{{ log.price }}</td>
+                        <td>{{ log.fee_amount }}</td>
+                        <td>{{ log.amount }}</td>
+                        <td>{{ log.order_id }}</td>
+                        <td>{{ log.pl_nominal }}</td>
+                        <td>{{ log.pl_relative }}</td>
+                        <td>{{ log.total_pl }}</td>
+                        <td>{{ log.current_capital }}</td>
+                        <td>{{ log.tank }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+    <p><br></p>
+    <ul class="nav nav-tabs" id="symbolTabs">
+        {% for symbol in symbols %}
+        <li class="nav-item">
+            <a class="nav-link {% if forloop.first %}active{% endif %}"
+            data-bs-toggle="tab"
+            href="#tab-{{ symbol|slugify }}">
+            {{ symbol }}
+            <canvas id="mini-equity-{{ symbol|slugify }}" width="80" height="30"></canvas>
+            </a>
+        </li>
+        {% endfor %}
+        </ul>
+
+        <div class="tab-content mt-3">
+        {% for symbol in symbols %}
+        <div class="tab-pane fade {% if forloop.first %}show active{% endif %}"
+            id="tab-{{ symbol|slugify }}">
+            <canvas id="chart-{{ symbol|slugify }}"></canvas>
+        </div>
+        {% endfor %}
+        </div>
+
+    <!-- ================= SYMBOL CHART TABS ================= -->
+
+    <div class="mt-5">
+        <ul class="nav nav-tabs" id="symbolTabs" role="tablist">
+            {% for symbol in symbols %}
+            <li class="nav-item" role="presentation">
+                <button
+                    class="nav-link {% if forloop.first %}active{% endif %}"
+                    id="tab-{{ symbol }}"
+                    data-bs-toggle="tab"
+                    data-bs-target="#content-{{ symbol }}"
+                    type="button"
+                    role="tab"
+                    aria-controls="content-{{ symbol }}"
+                    aria-selected="{% if forloop.first %}true{% else %}false{% endif %}"
+                    onclick="activateSymbol('{{ symbol }}')"
+                >
+                    {{ symbol }}
+                </button>
+            </li>
+            {% endfor %}
+        </ul>
+
+        <div class="tab-content border border-top-0 p-3">
+            {% for symbol in symbols %}
+            <div
+                class="tab-pane fade {% if forloop.first %}show active{% endif %}"
+                id="content-{{ symbol }}"
+                role="tabpanel"
+                aria-labelledby="tab-{{ symbol }}"
+            >
+                <center>
+                    <h4 id="chart-title-{{ symbol }}">
+                        Historische Daten für {{ symbol }}
+                    </h4>
+                </center>
+
+                <div
+                    id="historical-chart-{{ symbol }}"
+                    style="width:100%; height:900px;"
+                    class="chart-container"
+                    data-symbol="{{ symbol }}"
+                ></div>
+
+                <div class="mt-2 text-center">
+                    <button class="btn btn-primary" onclick="resumeChart('{{ symbol }}')">Resume</button>
+                    <button class="btn btn-secondary" onclick="pauseChart('{{ symbol }}')">Pause</button>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div id="bot-status" class="alert alert-secondary">
+    Bot: <span id="bot-running">–</span>
+    </div>
+
+<script>
+fetch("/api/bot/status/")
+  .then(r => r.json())
+  .then(s => {
+    document.getElementById("bot-running").innerText =
+      s.running ? "RUNNING" : "STOPPED";
+  });
+</script>
+
+<!-- Plotly JS -->
+<script src="{% static 'js/plotly-3.0.0.min.js' %}"></script>
+<script>
+    // Globale Variablen
+    var intervals = {}; // Speichert die Interval-IDs für jedes Symbol
+    var initialDuration = 30 * 60 * 1000; // 30 Minuten in ms
+    var isInitialized = {}; // Verfolgt, ob der Plot für ein Symbol initialisiert wurde
+
+    /**
+     * Holt die Daten (DataLogs und Trades) für ein Symbol.
+     * Lädt initial nur die letzten 30 Minuten.
+     */
+    function fetchData(symbol) {
+        var now = new Date();
+        var startTime = new Date(now - initialDuration).toISOString();
+        Promise.all([
+            fetch("{% url 'data_logs_api' %}?config_id={{ config.id }}&symbol=" + symbol + "&start_time=" + startTime).then(response => response.json()),
+            fetch("{% url 'trades_api' %}?config_id={{ config.id }}&symbol=" + symbol + "&start_time=" + startTime).then(response => response.json())
+        ]).then(([data, trades]) => {
+            updatePlot(symbol, data, trades);
+        }).catch(error => console.error("Fehler beim Abrufen der Daten für " + symbol + ": ", error));
+    }
+
+    /**
+     * Aktualisiert den Plotly-Chart für ein Symbol.
+     * Verwendet scattergl für Performance und behält Benutzereinstellungen bei.
+     */
+    function updatePlot(symbol, data, trades) {
+        if (data.length === 0) return;
+
+        // **Datenarrays extrahieren**
+        var timestamps = data.map(item => item.timestamp);
+        var prices = data.map(item => parseFloat(item.price));
+        var deltadelta = data.map(item => parseFloat(item.deltadelta));
+        var div_DVA_prev_NDA = data.map(item => parseFloat(item.div_DVA_prev_NDA));
+        var nda = data.map(item => parseFloat(item.nda));
+
+        // Überprüfen, ob 'nda' in den Daten vorhanden ist
+        if (!data[0].hasOwnProperty('nda')) {
+            console.error("Daten enthalten kein 'nda'-Feld");
+            return;
+        }
+
+        // **Minima und Maxima für Preise berechnen**
+        var minPrice = Math.min(...prices);
+        var maxPrice = Math.max(...prices);
+        var priceRange = maxPrice - minPrice;
+        var priceBuffer = priceRange * 0.05; // 5% Puffer
+
+        // **Charttitel aktualisieren**
+        var maxChangePct = ((maxPrice - minPrice) / minPrice * 100).toFixed(2);
+        var chartTitleEl = document.getElementById("chart-title-" + symbol);
+        if (chartTitleEl) {
+            chartTitleEl.innerText = "Historische Daten für " + symbol + " - Max Change: " + maxChangePct + "%";
+        }
+
+        // **Letzte Werte ermitteln**
+        var latestPrice = prices[prices.length - 1];
+        var latestDelta = deltadelta[deltadelta.length - 1];
+        var latestAccel = div_DVA_prev_NDA[div_DVA_prev_NDA.length - 1];
+        var latestNda = nda[nda.length - 1];
+
+        // **Traces definieren**
+        var tracePrice = {
+            x: timestamps,
+            y: prices,
+            mode: 'lines+markers',
+            type: 'scattergl',
+            name: symbol + ' Preis: ' + latestPrice.toFixed(8),
+            line: { width: 2, color: 'rgba(0, 51, 102, 0.8)' },
+            marker: { size: 2, color: 'rgba(0, 51, 102, 0.5)' }
+        };
+
+        var traceDelta = {
+            x: timestamps,
+            y: deltadelta,
+            mode: 'lines+markers',
+            type: 'scattergl',
+            name: ' DeltaDelta: ' + latestDelta.toFixed(6),
+            line: { dash: 'dash', width: 1.5, color: 'rgba(255, 99, 132, 0.7)' },
+            marker: { size: 2, color: 'rgba(255, 99, 132, 0.4)' },
+            yaxis: 'y2'
+        };
+
+        var traceAccel = {
+            x: timestamps,
+            y: div_DVA_prev_NDA,
+            mode: 'lines+markers',
+            type: 'scattergl',
+            name: ' Beschleunigung: ' + latestAccel.toFixed(6),
+            line: { dash: 'dot', width: 1.5, color: 'rgba(255, 165, 0, 0.8)' },
+            marker: { size: 2, color: 'rgba(255, 165, 0, 0.5)' },
+            yaxis: 'y3'
+        };
+
+        var traceNda = {
+            x: timestamps,
+            y: nda,
+            mode: 'lines+markers',
+            type: 'scattergl',
+            name: ' NDA: ' + latestNda.toFixed(6),
+            line: { dash: 'solid', width: 1.5, color: 'rgba(75, 192, 192, 0.7)' },
+            marker: { size: 2, color: 'rgba(75, 192, 192, 0.4)' },
+            yaxis: 'y4'
+        };
+
+        // **Trade-Traces**
+        var buyTrades = trades.filter(trade => trade.action === 'buy');
+        var sellTrades = trades.filter(trade => trade.action === 'sell');
+        var traceBuy = {
+            x: buyTrades.map(trade => trade.timestamp),
+            y: buyTrades.map(trade => parseFloat(trade.price)),
+            mode: 'markers',
+            type: 'scattergl',
+            marker: { symbol: 'triangle-up', color: 'green', size: 16 },
+            name: 'Buy Trades'
+        };
+        var traceSell = {
+            x: sellTrades.map(trade => trade.timestamp),
+            y: sellTrades.map(trade => parseFloat(trade.price)),
+            mode: 'markers',
+            type: 'scattergl',
+            marker: { symbol: 'triangle-down', color: 'red', size: 16 },
+            name: 'Sell Trades'
+        };
+
+        // **Indizes für Annotationen berechnen**
+        var minPriceIndex = prices.indexOf(minPrice);
+        var maxPriceIndex = prices.indexOf(maxPrice);
+        var minDelta = Math.min(...deltadelta);
+        var maxDelta = Math.max(...deltadelta);
+        var minDeltaIndex = deltadelta.indexOf(minDelta);
+        var maxDeltaIndex = deltadelta.indexOf(maxDelta);
+        var minAccel = Math.min(...div_DVA_prev_NDA);
+        var maxAccel = Math.max(...div_DVA_prev_NDA);
+        var minAccelIndex = div_DVA_prev_NDA.indexOf(minAccel);
+        var maxAccelIndex = div_DVA_prev_NDA.indexOf(maxAccel);
+        var minNda = Math.min(...nda);
+        var maxNda = Math.max(...nda);
+        var minNdaIndex = nda.indexOf(minNda);
+        var maxNdaIndex = nda.indexOf(maxNda);
+
+        // **Horizontale Linien alle 0.3%**
+        var step = minPrice * 0.003;
+        var levels = [minPrice];
+        var currentLevel = minPrice + step;
+        while (currentLevel <= maxPrice && levels.length < 100) {
+            levels.push(currentLevel);
+            currentLevel += step;
+        }
+        levels.push(maxPrice);
+        levels = levels.slice(0, 99);
+
+        // **Linien und Annotationen erstellen**
+        var shapes = [];
+        var lineAnnotations = [];
+        levels.forEach((level, index) => {
+            const isMin = level === minPrice;
+            const isMax = level === maxPrice;
+            shapes.push({
+                type: 'line',
+                xref: 'paper',
+                yref: 'y',
+                x0: 0,
+                x1: 1,
+                y0: level,
+                y1: level,
+                line: {
+                    color: 'rgba(255, 128, 128, 0.5)',
+                    width: isMin || isMax ? 2 : 1,
+                    dash: isMin || isMax ? 'solid' : 'dash'
+                }
+            });
+            lineAnnotations.push({
+                xref: 'paper',
+                x: -0.05,
+                y: level,
+                text: `${index}: ${level.toFixed(4)}`,
+                showarrow: false,
+                font: { color: 'rgba(255, 128, 128, 0.5)', size: 10 },
+                bgcolor: 'rgba(255, 255, 255, 0.1)',
+                xanchor: 'left',
+                yanchor: 'middle'
+            });
+            if (isMin || isMax) {
+                lineAnnotations.push({
+                    xref: 'paper',
+                    x: -0.051,
+                    y: level,
+                    text: (isMin ? 'MIN<br>' : 'MAX<br>') + `[${index}]: ${level.toFixed(4)}`,
+                    showarrow: false,
+                    font: { color: 'red', size: 14 },
+                    bgcolor: '#00008B',
+                    xanchor: 'right',
+                    yanchor: 'middle'
+                });
+            }
+        });
+
+        // **33%, 66% und 100% Linien**
+        const range = maxPrice - minPrice;
+        const third = minPrice + range * 0.33;
+        const twoThirds = minPrice + range * 0.66;
+        const purpleLines = [third, twoThirds, maxPrice];
+        purpleLines.forEach(level => {
+            shapes.push({
+                type: 'line',
+                xref: 'paper',
+                yref: 'y',
+                x0: 0,
+                x1: 1,
+                y0: level,
+                y1: level,
+                line: { color: 'purple', width: 2, dash: 'solid' }
+            });
+            lineAnnotations.push({
+                xref: 'paper',
+                x: -0.05,
+                y: level,
+                text: '1/3<br>' + `${level.toFixed(4)}`,
+                showarrow: false,
+                font: { color: 'purple', size: 12 },
+                bgcolor: 'rgba(255, 255, 255, 0.1)',
+                xanchor: 'left',
+                yanchor: 'middle'
+            });
+        });
+
+        var allAnnotations = [
+            { x: timestamps[minPriceIndex], y: minPrice, yref: 'y', text: 'Min Preis: ' + minPrice.toFixed(2), showarrow: true, arrowhead: 7, ax: 20, ay: 40 },
+            { x: timestamps[maxPriceIndex], y: maxPrice, yref: 'y', text: 'Max Preis: ' + maxPrice.toFixed(2), showarrow: true, arrowhead: 7, ax: 20, ay: -40 },
+            { x: timestamps[minDeltaIndex], y: minDelta, yref: 'y2', text: 'Min Delta: ' + minDelta.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: 40 },
+            { x: timestamps[maxDeltaIndex], y: maxDelta, yref: 'y2', text: 'Max Delta: ' + maxDelta.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: -40 },
+            { x: timestamps[minAccelIndex], y: minAccel, yref: 'y3', text: 'Min Beschl.: ' + minAccel.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: 40 },
+            { x: timestamps[maxAccelIndex], y: maxAccel, yref: 'y3', text: 'Max Beschl.: ' + maxAccel.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: -40 },
+            { x: timestamps[minNdaIndex], y: minNda, yref: 'y4', text: 'Min NDA: ' + minNda.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: 40 },
+            { x: timestamps[maxNdaIndex], y: maxNda, yref: 'y4', text: 'Max NDA: ' + maxNda.toFixed(2), showarrow: true, arrowhead: 7, ax: -20, ay: -40 }
+        ].concat(lineAnnotations);
+
+        // Layout und Plot initial definieren
+        if (!isInitialized[symbol]) {
+            var layout = {
+                title: '',
+                xaxis: { 
+                    title: 'Datum + Uhrzeit',
+                    rangeslider: { visible: true },
+                    // Sichtbaren Bereich der x-Achse auf die letzten 30 Minuten setzen
+                    range: (function(){
+                        var endTime = new Date(timestamps[timestamps.length - 1]);
+                        var startTime = new Date(endTime.getTime() - 30 * 60 * 1000);
+                        return [startTime.toISOString(), endTime.toISOString()];
+                    })()
+                },
+                yaxis: { 
+                    title: 'Preis', 
+                    side: 'left', 
+                    anchor: 'free',
+                    autorange: true 
+                },
+                yaxis2: { 
+                    title: 'DeltaDelta', 
+                    overlaying: 'y', 
+                    side: 'right', 
+                    anchor: 'free',
+                    position: 1,
+                    autorange: true 
+                },
+                yaxis3: { 
+                    title: 'Beschleunigung', 
+                    overlaying: 'y', 
+                    side: 'right', 
+                    anchor: 'free',
+                    position: 0.99,
+                    autorange: true 
+                },
+                yaxis4: { 
+                    title: 'NDA', 
+                    overlaying: 'y', 
+                    side: 'right', 
+                    anchor: 'free',
+                    position: 0.98,
+                    autorange: true 
+                },
+                margin: { t: 50, b: 50, l: 200, r: 200 },
+                shapes: shapes,
+                annotations: allAnnotations
+            };
+
+            // Aggregierten Trace (für den Range Slider) erstellen
+            var aggregated_x = timestamps.concat(buyTrades.map(trade => trade.timestamp)).concat(sellTrades.map(trade => trade.timestamp));
+            var aggregated_y = prices.concat(buyTrades.map(trade => parseFloat(trade.price))).concat(sellTrades.map(trade => parseFloat(trade.price)));
+            var sliderTrace = {
+                x: aggregated_x,
+                y: aggregated_y,
+                mode: 'lines+markers',
+                type: 'scattergl',
+                marker: { size: 2 },
+                line: { width: 2, color: 'rgba(0, 51, 102, 0.8)' },
+                showlegend: false,
+                hoverinfo: 'skip'
+            };
+
+            Plotly.newPlot('historical-chart-' + symbol, [sliderTrace, tracePrice, traceDelta, traceAccel, traceNda, traceBuy, traceSell], layout);
+            isInitialized[symbol] = true;
+        } else {
+            // Beim Update alle 7 Traces aktualisieren, damit die y-Achsen-Skalierung korrekt berechnet wird.
+            var aggregated_x = timestamps.concat(buyTrades.map(trade => trade.timestamp)).concat(sellTrades.map(trade => trade.timestamp));
+            var aggregated_y = prices.concat(buyTrades.map(trade => parseFloat(trade.price))).concat(sellTrades.map(trade => parseFloat(trade.price)));
+            Plotly.update('historical-chart-' + symbol, {
+                x: [
+                    aggregated_x, 
+                    timestamps, 
+                    timestamps, 
+                    timestamps, 
+                    timestamps, 
+                    buyTrades.map(trade => trade.timestamp), 
+                    sellTrades.map(trade => trade.timestamp)
+                ],
+                y: [
+                    aggregated_y,
+                    prices,
+                    deltadelta,
+                    div_DVA_prev_NDA,
+                    nda,
+                    buyTrades.map(trade => parseFloat(trade.price)),
+                    sellTrades.map(trade => parseFloat(trade.price))
+                ]
+            }, {}, [0, 1, 2, 3, 4, 5, 6]);
+        }
+    }
+
+    // Intersection Observer für Lazy Loading & Pausieren
+    var chartObserver = new IntersectionObserver((entries, observer) => {
+        entries.forEach(entry => {
+            var symbol = entry.target.getAttribute('data-symbol');
+            if (entry.isIntersecting) {
+                resumeChart(symbol);
+            } else {
+                pauseChart(symbol);
+            }
+        });
+    }, { threshold: 0.5 });
+
+    document.querySelectorAll('.chart-container').forEach(el => {
+        chartObserver.observe(el);
+    });
+
+    function pauseChart(symbol) {
+        if (intervals[symbol]) {
+            clearInterval(intervals[symbol]);
+            delete intervals[symbol];
+        }
+    }
+
+    function resumeChart(symbol) {
+        if (!intervals[symbol]) {
+            intervals[symbol] = setInterval(function() {
+                fetchData(symbol);
+            }, {{ config.time_interval|default:5 }} * 1000);
+        }
+    }
+    function activateSymbol(symbol) {
+        for (var s in intervals) {
+            pauseChart(s);
+        }
+
+        activeSymbol = symbol;
+
+        if (!isInitialized[symbol]) {
+            fetchData(symbol);
+        }
+
+        resumeChart(symbol);
+    }
+
+
+    // Global pause/resume
+    function pauseAllCharts() {
+        for (var symbol in intervals) {
+            pauseChart(symbol);
+        }
+    }
+    function resumeAllCharts() {
+        {% for symbol in symbols %}
+        resumeChart("{{ symbol }}");
+        {% endfor %}
+    }
+
+    document.addEventListener("DOMContentLoaded", function () {
+        {% if symbols %}
+            activateSymbol("{{ symbols.0 }}");
+        {% endif %}
+    });
+
+    function updateTradingLog() {
+        fetch("{% url 'logs_api' config.id %}")
+            .then(response => response.json())
+            .then(data => {
+                var tbody = document.getElementById('trading-log-body');
+                var rows = "";
+                data.forEach(function(log) {
+                    rows += "<tr class='" + (log.action === "buy" ? "table-success" : (log.action === "sell" ? "table-danger" : "")) + "'>" +
+                        "<td>" + log.symbol + "</td>" +
+                        "<td>" + log.date + "</td>" +
+                        "<td>" + log.time + "</td>" +                        
+                        "<td>" + log.action + "</td>" +
+                        "<td>" + log.price + "</td>" +
+                        "<td>" + log.fee_amount + "</td>" +
+                        "<td>" + log.amount + "</td>" +
+                        "<td>" + log.order_id + "</td>" +
+                        "<td>" + log.pl_nominal + "</td>" +
+                        "<td>" + log.pl_relative + "</td>" +
+                        "<td>" + log.total_pl + "</td>" +
+                        "<td>" + log.current_capital + "</td>" +
+                        "<td>" + log.tank + "</td>" +
+                        "</tr>";
+                });
+                tbody.innerHTML = rows;
+            })
+            .catch(error => console.error("Fehler beim Aktualisieren des Trading-Logbuchs:", error));
+    }
+
+    function updateInfoPanel() {
+    fetch("{% url 'info_api' config.id %}")
+        .then(response => response.json())
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('current-capital').innerText = data.current_capital;
+            document.getElementById('tank').innerText = data.tank;
+            document.getElementById('buy-orders').innerText = data.buy_orders;
+            document.getElementById('sell-orders').innerText = data.sell_orders;
+            document.getElementById('profitable-sells').innerText = data.profitable_sells;
+            document.getElementById('unprofitable-sells').innerText = data.unprofitable_sells;
+
+            // 🔥 Performance Metrics
+            document.getElementById('win-rate').innerText = data.win_rate;
+            document.getElementById('avg-profit-trade').innerText = data.avg_profit_trade;
+            document.getElementById('avg-win').innerText = data.avg_win;
+            document.getElementById('avg-loss').innerText = data.avg_loss;
+            document.getElementById('risk-reward').innerText = data.risk_reward;
+            document.getElementById('profit-factor').innerText = data.profit_factor;
+            document.getElementById('biggest-win').innerText = data.biggest_win;
+            document.getElementById('biggest-loss').innerText = data.biggest_loss;
+
+            // Risk
+            document.getElementById('sharpe').innerText = data.sharpe_ratio;
+            document.getElementById('max-dd').innerText = data.max_drawdown;
+            document.getElementById('current-dd').innerText = data.current_drawdown;
+
+            // Metriken aktualisieren
+            if (data.metrics) {
+                document.getElementById('win-rate').innerText = data.metrics.win_rate + " %";
+                document.getElementById('avg-profit').innerText = data.metrics.avg_profit;
+                document.getElementById('avg-win').innerText = data.metrics.avg_win;
+                document.getElementById('avg-loss').innerText = data.metrics.avg_loss;
+                document.getElementById('rrr').innerText = data.metrics.risk_reward;
+                document.getElementById('profit-factor').innerText = data.metrics.profit_factor;
+                document.getElementById('max-win').innerText = data.metrics.max_win;
+                document.getElementById('max-loss').innerText = data.metrics.max_loss;
+            }
+
+            // Equity Curve Update...
+            updateEquityCurve(data.equity_timestamps, data.equity_curve);
+        })
+        .catch(error => console.error("Fehler beim Aktualisieren der Infotafel:", error));
+    }
+
+    var equityInitialized = false;
+
+    function updateEquityCurve(timestamps, equity) {
+        var trace = {
+            x: timestamps,
+            y: equity,
+            type: 'scatter',
+            mode: 'lines',
+            line: { width: 2 }
+        };
+
+        var layout = {
+            title: 'Mini Equity Curve',
+            margin: { t: 30, b: 40, l: 50, r: 20 },
+            xaxis: { showgrid: false },
+            yaxis: { showgrid: true },
+            height: 220
+        };
+
+        if (!equityInitialized) {
+            Plotly.newPlot('equity-curve', [trace], layout, {displayModeBar: false});
+            equityInitialized = true;
+        } else {
+            Plotly.update('equity-curve', {
+                x: [timestamps],
+                y: [equity]
+            });
+        }
+    }
+
+
+
+    function updateDashboardData() {
+        updateTradingLog();
+        updateInfoPanel();
+    }
+
+    setInterval(updateDashboardData, 5000);
+</script>
+<script>
+function renderMiniEquity(symbol, data) {
+  const ctx = document.getElementById(`mini-equity-${symbol}`).getContext("2d");
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.map(d => d.t),
+      datasets: [{
+        data: data.map(d => d.v),
+        borderWidth: 1,
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { display: false }, y: { display: false } }
+    }
+  });
+}
+
+fetch("/api/info/{{ config.id }}/")
+  .then(r => r.json())
+  .then(info => {
+    {% for symbol in symbols %}
+      renderMiniEquity("{{ symbol|slugify }}", info.equity);
+    {% endfor %}
+  });
+</script>
+
+{% else %}
+<center>
+<p>Keine Konfiguration gefunden. Bitte erstelle eine.</p>
+<a href="{% url 'config' %}" class="btn btn-primary">Neue Konfiguration</a>
+</center>
+{% endif %}
+{% endblock %}
