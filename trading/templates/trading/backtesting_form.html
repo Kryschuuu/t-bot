@@ -414,7 +414,8 @@
 <script>
     {% for task in tasks_running %}
     (function() {
-        const ws = new WebSocket(`ws://${window.location.host}/ws/backtest/{{ task.id }}/`);
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/backtest/{{ task.id }}/`);
         ws.onmessage = function(event) {
             const data = JSON.parse(event.data);
             const progressElement = document.querySelector(`#progress-{{ task.id }}`);

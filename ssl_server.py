@@ -1,4 +1,13 @@
 # ssl_server.py
+#
+# NUR fuer lokale HTTPS-Entwicklung gedacht (z.B. um Browser-Feature-
+# Beschraenkungen zu testen, die HTTPS voraussetzen). Auf Render WIRD DIESES
+# SKRIPT NICHT VERWENDET: Render terminiert TLS/SSL zentral am Edge/Load-
+# balancer und leitet unverschluesselten HTTP-Traffic an den Container
+# weiter (Header X-Forwarded-Proto zeigt an, dass es urspruenglich https war,
+# siehe SECURE_PROXY_SSL_HEADER in settings.py). Ein eigener SSL-Server im
+# Container ist dort weder noetig noch sinnvoll - der Produktions-Start-
+# befehl ist stattdessen ein ASGI-Server (daphne), siehe render.yaml.
 import os
 import ssl
 from django.core.management.commands.runserver import Command as RunserverCommand

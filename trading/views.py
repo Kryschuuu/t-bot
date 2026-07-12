@@ -8,11 +8,10 @@ from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse, HttpResponse
 from django.template.loader import render_to_string
 from django.db.models import Sum, F, DecimalField, Max, Min
-from django_redis import get_redis_connection
 from .forms import RegistrationForm, LoginForm, ConfigurationForm, DashboardConfigurationForm, BacktestForm
 from .models import Configuration, TradingLog, DataLog, BacktestTask
 from .backtesting import Backtesting
-from .tasks import run_backtest
+from .tasks import run_backtest, dispatch_task
 from channels.layers import get_channel_layer
 from celery.result import AsyncResult
 from celery import shared_task, Celery
@@ -721,7 +720,7 @@ def backtesting_form(request, config_id):
                 # Keine Celery-Task-Ausführung hier, da sie geplant ist
             else:
                 task_id = backtest_task.id
-                celery_task = run_backtest.delay(config.id, params, symbols, task_id)
+                celery_task = dispatch_task(run_backtest, config.id, params, symbols, task_id)
                 backtest_task.celery_task_id = celery_task.id
                 backtest_task.status = 'pending' # Status auf 'pending' für sofortige Ausführung
                 backtest_task.save()
@@ -892,7 +891,7 @@ def schedule_backtests():
 
         logger.info(f"Starte geplanten Task {task_id} für Symbole: {symbols}, Parameter: {params}") # Logging hinzugefügt
 
-        celery_task = run_backtest.delay(task.configuration_id, params, symbols, task_id) # Hier run_backtest verwenden
+        celery_task = dispatch_task(run_backtest, task.configuration_id, params, symbols, task_id) # Hier run_backtest verwenden
         task.celery_task_id = celery_task.id
         task.status = 'pending' # Status auf 'pending' setzen, um die Ausführung zu starten
         task.is_scheduled = False # Nicht mehr geplant

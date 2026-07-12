@@ -5,6 +5,9 @@ from decimal import Decimal, ROUND_HALF_UP
 import numpy as np
 import random
 import json
+import threading
+import uuid
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.core.exceptions import ObjectDoesNotExist
@@ -15,6 +18,52 @@ from .backtesting import Backtesting
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class _EagerAsyncResultStub:
+    """Minimales Ersatz-Objekt fuer AsyncResult im Free-Tier Fallback.
+
+    Bietet nur das .id Attribut, das der aufrufende Code (views.py) in
+    BacktestTask.celery_task_id speichert. AsyncResult(diese_id) liefert
+    spaeter naturgemaess PENDING zurueck, da kein Broker/Backend involviert
+    ist - Pause/Cancel ueber Celery-Revoke funktioniert daher im Fallback-
+    Modus nicht (siehe README/Deployment-Doku).
+    """
+    def __init__(self, task_id):
+        self.id = task_id
+
+
+def dispatch_task(task, *args, **kwargs):
+    """Startet einen Celery-Task, Render-Free-Tier-kompatibel.
+
+    - Ist ein echter Broker konfiguriert (REDIS_URL gesetzt, z.B. auf einem
+      bezahlten Plan mit Redis/Key-Value + separatem Worker-Service):
+      normales verteiltes .delay().
+    - Ohne Broker (Render Free Tier, CELERY_TASK_ALWAYS_EAGER=True):
+      .delay() wuerde synchron *im selben Thread* laufen und damit die
+      HTTP-Antwort blockieren (bei einer Kombinationsexplosion von
+      Backtest-Parametern potenziell fuer Minuten). Stattdessen wird der
+      Task hier in einem Hintergrund-Thread desselben Prozesses ausgefuehrt -
+      kein Broker/Worker noetig, blockiert aber den Request nicht.
+    """
+    if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+        synthetic_id = f"eager-{uuid.uuid4()}"
+
+        def _run():
+            try:
+                task.apply(args=args, kwargs=kwargs, task_id=synthetic_id, throw=True)
+            except Exception:
+                logger.exception(
+                    "Fehler bei Hintergrund-Ausfuehrung von %s (Free-Tier Fallback ohne Broker)",
+                    getattr(task, "name", task),
+                )
+
+        threading.Thread(
+            target=_run, daemon=True, name=f"task-{getattr(task, 'name', 'unknown')}"
+        ).start()
+        return _EagerAsyncResultStub(synthetic_id)
+
+    return task.delay(*args, **kwargs)
 
 def decimal_to_str(obj):
     """Konvertiert Decimal-Objekte rekursiv in Strings."""
@@ -162,9 +211,9 @@ def schedule_backtests():
         params = task.parameters
         task_id = task.id
 
-        logger.info(f"Starte Task {task_id} mit run_backtest.delay. Symbole: {symbols}, Parameter: {params}")
-        celery_task = run_backtest.delay(task.configuration_id, params, symbols, task_id)
-        logger.info(f"run_backtest.delay aufgerufen. Celery Task ID: {celery_task.id}") # Log der Celery Task ID
+        logger.info(f"Starte Task {task_id} mit run_backtest. Symbole: {symbols}, Parameter: {params}")
+        celery_task = dispatch_task(run_backtest, task.configuration_id, params, symbols, task_id)
+        logger.info(f"run_backtest dispatcht. Task ID: {celery_task.id}") # Log der Task ID
         task.celery_task_id = celery_task.id
         task.status = 'pending'
         task.is_scheduled = False

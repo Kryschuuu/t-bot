@@ -1,4 +1,15 @@
 # trading_bot_project/celery.py
+#
+# HINWEIS Render Free Tier: Ohne REDIS_URL laeuft Celery im "eager" Modus
+# (siehe settings.py) - es gibt dann keinen echten Broker und somit auch
+# keinen "celery beat" Prozess, der den unten stehenden beat_schedule
+# ausfuehren wuerde (Render Free Tier bietet ohnehin keine Background-
+# Worker-/Cron-Instanzen). trading.tasks.schedule_backtests() kann
+# stattdessen manuell (Django-Shell/Management-Command) oder ueber einen
+# externen Cron-Dienst (z.B. cron-job.org), der einen geschuetzten
+# Endpunkt/Management-Command ausloest, periodisch aufgerufen werden.
+# Auf einem bezahlten Plan mit Redis + separatem Worker- und Beat-Service
+# greift der beat_schedule unten wieder ganz normal.
 from celery import Celery
 from celery.schedules import crontab
 import os

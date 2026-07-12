@@ -1,64 +1,106 @@
 # trading_bot_project/settings.py
 import os
-from pathlib import Path
-import secrets
 import logging
-import socket
+from pathlib import Path
 
-# Logging konfigurieren
-logger = logging.getLogger(__name__)
+import dj_database_url
 
-# Basisverzeichnis des Projekts
-# BASE_DIR = Path(__file__).resolve().parent
+# ---------------------------------------------------------------------------
+# Basisverzeichnis
+# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-print(BASE_DIR)
-SECRET_KEY = secrets.token_urlsafe(50)
-DEBUG = True
+logger = logging.getLogger(__name__)
 
 
-# Dynamische Ermittlung der lokalen IP-Adresse
-def get_ip_address():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # Erfordert keine echte Verbindung
-        s.connect(('10.255.255.255', 1))
-        IP = s.getsockname()[0]
-    except Exception:
-        IP = '127.0.0.1'
-    finally:
-        s.close()
-    return IP
+def env_bool(name, default=False):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
-# Erlaubt localhost, die IP der Maschine und ggf. einen Domainnamen
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', get_ip_address()]
 
-# Falls du über Nginx/Proxy zugreifst
-CSRF_TRUSTED_ORIGINS = [f"http://{get_ip_address()}:8000", f"https://{get_ip_address()}:8000"]
+# ---------------------------------------------------------------------------
+# Sicherheit / Grundkonfiguration
+# ---------------------------------------------------------------------------
+# WICHTIG: In Produktion (Render) MUSS SECRET_KEY über die Environment-Variable
+# gesetzt werden. Vorher wurde bei jedem Prozessstart ein neuer, zufälliger Key
+# erzeugt (secrets.token_urlsafe(50)) - das invalidiert bei mehreren Workern
+# (oder jedem Neustart/Deploy) sofort alle Sessions und CSRF-Tokens.
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    if env_bool("RENDER", False):
+        raise RuntimeError(
+            "SECRET_KEY environment variable is required on Render. "
+            "Set it in the service's Environment settings."
+        )
+    # Nur für lokale Entwicklung: stabiler Dummy-Key (kein Zufalls-Reset mehr)
+    SECRET_KEY = "django-insecure-local-dev-key-not-for-production"
 
-#ALLOWED_HOSTS = ['127.0.0.1', '0.0.0.0', '192.168.0.4', '192.168.0.217', 'localhost', 'tradingbot.local', 'tbot.local', 'tbot.localhost']
+DEBUG = env_bool("DEBUG", default=not env_bool("RENDER", False))
 
+# Render stellt den öffentlichen Hostnamen automatisch als Env-Var bereit
+RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+if RENDER_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+extra_hosts = os.environ.get("DJANGO_ALLOWED_HOSTS", "")
+ALLOWED_HOSTS += [h.strip() for h in extra_hosts.split(",") if h.strip()]
+if DEBUG:
+    ALLOWED_HOSTS.append("*")
+
+CSRF_TRUSTED_ORIGINS = []
+if RENDER_EXTERNAL_HOSTNAME:
+    CSRF_TRUSTED_ORIGINS.append(f"https://{RENDER_EXTERNAL_HOSTNAME}")
+extra_origins = os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+CSRF_TRUSTED_ORIGINS += [o.strip() for o in extra_origins.split(",") if o.strip()]
+
+# ---------------------------------------------------------------------------
 # Celery-Konfiguration
-CELERY_TIMEZONE = 'UTC'
-USE_TZ = True
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
+# ---------------------------------------------------------------------------
+# Render Free Tier bietet keinen kostenlosen Redis/Broker und keine
+# Background-Worker-Instanzen. Ist kein REDIS_URL gesetzt, laeuft Celery im
+# "eager" Modus: app.task.delay(...) fuehrt die Aufgabe SOFORT UND SYNCHRON
+# im aufrufenden Prozess aus - es wird weder ein Broker noch ein separater
+# Worker-Prozess benoetigt. Sobald REDIS_URL gesetzt ist (z.B. Render Key
+# Value oder ein externer Redis-Dienst auf einem bezahlten Plan), wird ganz
+# normal ueber den Broker verteilt und ein "celery worker" Prozess kann die
+# Tasks abarbeiten.
+REDIS_URL = os.environ.get("REDIS_URL")
+
+CELERY_TIMEZONE = "UTC"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-CELERY_TASK_SOFT_TIME_LIMIT = 60 * 60  # 1 Stunde
-CELERY_TASK_TIME_LIMIT = 60 * 60 + 300  # 1h 5m
-# Sicherheitseinstellungen
+CELERY_TASK_SOFT_TIME_LIMIT = 60 * 60
+CELERY_TASK_TIME_LIMIT = 60 * 60 + 300
+
+if REDIS_URL:
+    CELERY_BROKER_URL = REDIS_URL
+    CELERY_RESULT_BACKEND = REDIS_URL
+    CELERY_TASK_ALWAYS_EAGER = False
+else:
+    CELERY_BROKER_URL = "memory://"
+    CELERY_RESULT_BACKEND = "cache+memory://"
+    CELERY_TASK_ALWAYS_EAGER = True
+    CELERY_TASK_EAGER_PROPAGATES = True
+
+# ---------------------------------------------------------------------------
+# Security Header (nur wenn nicht DEBUG)
+# ---------------------------------------------------------------------------
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    # Render terminiert TLS bereits am Edge/Loadbalancer und leitet Requests
+    # per HTTP an den Container weiter, setzt aber den Header X-Forwarded-Proto.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7  # 7 Tage (konservativ starten)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
-    SECURE_REFERRER_POLICY = 'same-origin'
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_HSTS_PRELOAD = False
+    SECURE_REFERRER_POLICY = "same-origin"
 else:
     SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = False
@@ -66,115 +108,175 @@ else:
 
 LOGIN_URL = "/login/"
 
+# ---------------------------------------------------------------------------
+# Apps / Middleware
+# ---------------------------------------------------------------------------
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'django_extensions',
-    'channels',
-    'trading.apps.TradingConfig',  # Nur DIESE Zeile behalten
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "django_extensions",
+    "channels",
+    "trading.apps.TradingConfig",
 ]
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = 'trading_bot_project.urls'
+ROOT_URLCONF = "trading_bot_project.urls"
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [os.path.join(BASE_DIR, 'templates')],  # Globale Templates
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [os.path.join(BASE_DIR, "templates")],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-# Channels-Konfiguration: Verwende Redis als Channel-Layer-Backend
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [("redis://localhost:6379/0")],
-        },
-    },
-}
+# ---------------------------------------------------------------------------
+# Channels (WebSocket) Konfiguration
+# ---------------------------------------------------------------------------
+# Render Free Tier laeuft immer nur mit EINER Instanz (kein Autoscaling im
+# Free Plan), daher reicht der In-Memory Channel-Layer vollkommen aus und
+# es wird kein Redis benoetigt. Wird REDIS_URL gesetzt (z.B. bei einem
+# Upgrade auf einen bezahlten Plan mit mehreren Instanzen), wird automatisch
+# auf den Redis-Channel-Layer umgeschaltet.
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        }
+    }
 
-# Wichtig: ASGI_APPLICATION muss auf die asgi.py in Deinem Projekt verweisen
 ASGI_APPLICATION = "trading_bot_project.asgi.application"
 WSGI_APPLICATION = "trading_bot_project.wsgi.application"
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'tbot_db',
-        'USER': 'tbot',
-        'PASSWORD': 'tbot',
-        'HOST': 'localhost',
-        'PORT': '5432',
+# ---------------------------------------------------------------------------
+# Datenbank
+# ---------------------------------------------------------------------------
+# Render stellt bei verknuepfter Postgres-Instanz automatisch DATABASE_URL
+# bereit. Lokal faellt die App auf SQLite zurueck, falls nichts gesetzt ist.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            ssl_require=env_bool("DATABASE_SSL_REQUIRE", True),
+        )
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
-    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',},
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
 ]
 
-LANGUAGE_CODE = 'de-de'
-TIME_ZONE = 'Europe/Berlin'
+LANGUAGE_CODE = "de-de"
+TIME_ZONE = "Europe/Berlin"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = '/static/'
-#STATICFILES_DIRS = [os.path.join(BASE_DIR.parent, 'static')]
-#STATIC_ROOT = os.path.join(BASE_DIR.parent, 'staticfiles')
-
-STATICFILES_DIRS = [BASE_DIR / "static"]
+# ---------------------------------------------------------------------------
+# Static Files (WhiteNoise - kein persistenter Storage auf Render noetig)
+# ---------------------------------------------------------------------------
+STATIC_URL = "/static/"
+STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").exists() else []
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-print(STATIC_URL)
-print(STATICFILES_DIRS)
-print(STATIC_ROOT)
-# Logging-Konfiguration (optional, hier als Beispiel)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Render Free Tier hat KEINEN persistenten Storage - Logdateien wuerden bei
+# jedem Deploy/Neustart verloren gehen. Daher wird in Produktion nach STDOUT
+# geloggt (von Render automatisch eingesammelt); lokal weiterhin zusaetzlich
+# in eine Datei.
+handlers = {
+    "console": {
+        "level": "INFO",
+        "class": "logging.StreamHandler",
+    },
+}
+trading_handlers = ["console"]
+
+if DEBUG:
+    handlers["file"] = {
+        "level": "DEBUG",
+        "class": "logging.FileHandler",
+        "filename": os.path.join(BASE_DIR, "trading_bot.log"),
+        "formatter": "verbose",
+    }
+    trading_handlers.append("file")
+
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{asctime} {levelname} {module} {process:d} {thread:d} {message}',
-            'style': '{',
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname} {module} {process:d} {thread:d} {message}",
+            "style": "{",
         },
     },
-    'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'trading_bot.log'),
-            'formatter': 'verbose',
+    "handlers": handlers,
+    "loggers": {
+        "trading": {
+            "handlers": trading_handlers,
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
         },
-    },
-    'loggers': {
-        'trading': {
-            'handlers': ['file'],
-            'level': 'DEBUG',
-            'propagate': True,
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
         },
     },
 }
+
+# ---------------------------------------------------------------------------
+# App-spezifische Einstellungen
+# ---------------------------------------------------------------------------
+# Steuert, ob TradingBots fuer aktive Konfigurationen beim Prozessstart
+# automatisch gestartet werden sollen (siehe trading/apps.py).
+AUTOSTART_BOTS = env_bool("AUTOSTART_BOTS", True)
