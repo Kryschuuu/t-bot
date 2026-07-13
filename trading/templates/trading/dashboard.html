@@ -306,15 +306,29 @@
 
     <div id="bot-status" class="alert alert-secondary">
     Bot: <span id="bot-running">–</span>
+    <div id="bot-error" class="small text-danger mt-1" style="display:none;"></div>
     </div>
 
 <script>
-fetch("/api/bot/status/")
-  .then(r => r.json())
-  .then(s => {
-    document.getElementById("bot-running").innerText =
-      s.running ? "RUNNING" : "STOPPED";
-  });
+function pollBotStatus() {
+    fetch("{% url 'bot_status_api' %}?config_id={{ config.id }}")
+      .then(r => r.json())
+      .then(s => {
+        document.getElementById("bot-running").innerText =
+          s.running ? "RUNNING" : "STOPPED";
+        var errEl = document.getElementById("bot-error");
+        if (s.last_error) {
+            var when = s.last_error_at ? new Date(s.last_error_at * 1000).toLocaleTimeString() : "";
+            errEl.style.display = "block";
+            errEl.innerText = "Letzter Fehler (" + when + "): " + s.last_error;
+        } else {
+            errEl.style.display = "none";
+        }
+      })
+      .catch(err => console.error("Fehler beim Abrufen des Bot-Status: ", err));
+}
+pollBotStatus();
+setInterval(pollBotStatus, 10000);
 </script>
 
 <!-- Plotly JS -->

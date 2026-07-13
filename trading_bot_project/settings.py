@@ -132,6 +132,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "trading.middleware.PassphraseGateMiddleware",
 ]
 
 ROOT_URLCONF = "trading_bot_project.urls"
@@ -280,3 +281,12 @@ LOGGING = {
 # Steuert, ob TradingBots fuer aktive Konfigurationen beim Prozessstart
 # automatisch gestartet werden sollen (siehe trading/apps.py).
 AUTOSTART_BOTS = env_bool("AUTOSTART_BOTS", True)
+
+# ---------------------------------------------------------------------------
+# Passphrase-Gate (Landingpage vor Registrierung/Login)
+# ---------------------------------------------------------------------------
+# WICHTIG: Der Default-Wert ist NUR zum Testen gedacht und oeffentlich in
+# diesem Repo sichtbar. Fuer den echten Betrieb PASSPHRASE unbedingt als
+# eigene Environment-Variable auf Render setzen (Dashboard -> Environment)!
+PASSPHRASE = os.environ.get("PASSPHRASE", "n7kQ2vX9mP5wL8eRt3bF")
+PASSPHRASE_GATE_ENABLED = env_bool("PASSPHRASE_GATE_ENABLED", True)

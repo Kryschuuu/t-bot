@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+from django.conf import settings
 from datetime import datetime, timedelta, date
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth import authenticate, login, logout
@@ -32,7 +33,6 @@ import asyncio
 from io import BytesIO
 import base64
 import math
-from .bot_manager import start_bot, stop_bot
 
 # Logging konfigurieren
 logger = logging.getLogger(__name__)
@@ -40,6 +40,32 @@ logger = logging.getLogger(__name__)
 
 def home(request):    
     return redirect('login')
+
+
+def passphrase_gate_view(request):
+    """Landingpage mit Disclaimer + Passphrase-Eingabe (siehe PassphraseGateMiddleware).
+
+    Nach erfolgreicher Eingabe wird ein Session-Flag gesetzt, sodass die
+    Passphrase pro Browser-Session nur einmal eingegeben werden muss.
+    """
+    # Bereits verifiziert -> direkt zur eigentlich gewuenschten Seite (oder Login)
+    if request.session.get("passphrase_verified"):
+        return redirect(request.GET.get("next") or "login")
+
+    error = None
+    next_url = request.POST.get("next") or request.GET.get("next") or ""
+
+    if request.method == "POST":
+        submitted = request.POST.get("passphrase", "")
+        import secrets as _secrets
+        if _secrets.compare_digest(submitted.strip(), str(settings.PASSPHRASE)):
+            request.session["passphrase_verified"] = True
+            return redirect(next_url or "login")
+        else:
+            error = "Falsche Passphrase. Zugang verweigert."
+
+    return render(request, "trading/passphrase_gate.html", {"error": error, "next": next_url})
+
 
 def register_view(request):
     if request.method == 'POST':
@@ -136,14 +162,29 @@ def config_edit_view(request, config_id):
 @login_required
 def config_activate(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    #start_bot(config_id)
+
+    # Bot nur starten, wenn er NICHT bereits laeuft (im echten, gemeinsamen
+    # bot_manager-Singleton aus trading_bot.py - siehe Fehler "Bot: STOPPED"
+    # im Debugging-Protokoll: es gab hier frueher ein zweites, komplett
+    # unabhaengiges Status-Dict (trading/bot_manager.py), das nie aktualisiert
+    # wurde. Das ist jetzt entfernt - Configuration.is_running (DB) und
+    # bot_manager.is_running() (echter Thread) sind die einzigen beiden
+    # Quellen der Wahrheit, und bot_status_api liest jetzt aus genau diesen.
+    if not bot_manager.is_running(config.id):
+        try:
+            bot_manager.start_bot(config)
+        except Exception as e:
+            logger.exception("Bot-Start fuer Konfiguration %s fehlgeschlagen: %s", config.id, e)
+            messages.error(
+                request,
+                f"Bot konnte nicht gestartet werden: {e}. "
+                f"Bitte Exchange/Symbole in der Konfiguration pruefen."
+            )
+            return redirect('config_list')
+
     if not config.is_running:
         config.is_running = True
         config.save(update_fields=["is_running"])
-
-    # 🔒 Bot nur starten, wenn er NICHT läuft
-    if not bot_manager.is_running(config.id):
-        bot_manager.start_bot(config)
 
     return redirect('config_list')
 
@@ -151,14 +192,13 @@ def config_activate(request, config_id):
 @login_required
 def config_deactivate(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    stop_bot()
+
+    if bot_manager.is_running(config.id):
+        bot_manager.stop_bot(config)
+
     if config.is_running:
         config.is_running = False
         config.save(update_fields=["is_running"])
-
-    # 🔒 Nur stoppen, wenn er wirklich läuft
-    if bot_manager.is_running(config.id):
-        bot_manager.stop_bot(config)
 
     return redirect('config_list')
 
@@ -431,8 +471,20 @@ def info_api(request, config_id):
 
 @login_required
 def bot_status_api(request):
-    from .bot_manager import get_status
-    return JsonResponse(get_status())
+    config_id = request.GET.get('config_id')
+    if not config_id:
+        return JsonResponse({"error": "config_id fehlt"}, status=400)
+    try:
+        config = Configuration.objects.get(id=config_id, user=request.user)
+    except Configuration.DoesNotExist:
+        return JsonResponse({"error": "Configuration not found"}, status=404)
+
+    status = bot_manager.status(config.id)
+    # DB-Flag ergaenzen: is_running kann True sein, obwohl der Thread in
+    # diesem Prozess (z.B. nach einem Render-Neustart) nicht mehr existiert -
+    # das ist ein separates, sichtbares Signal fuer den Nutzer.
+    status["is_running_flag"] = config.is_running
+    return JsonResponse(status)
 
 @login_required
 def logs_api(request, config_id):

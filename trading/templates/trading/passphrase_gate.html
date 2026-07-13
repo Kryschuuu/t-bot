@@ -1,0 +1,48 @@
+{% extends "trading/base.html" %}
+{% block content %}
+<div class="container d-flex align-items-center justify-content-center" style="min-height: 70vh;">
+  <div class="card shadow-sm" style="max-width: 480px; width: 100%;">
+    <div class="card-body p-4">
+
+      <h3 class="text-center mb-3">🔒 t-bot</h3>
+
+      <div class="alert alert-warning text-center" role="alert" style="font-weight: 600;">
+        PRIVATES PROJEKT – SELBSTHAFTUNG<br>
+        NUR MIT PASSPHRASE ZUGÄNGLICH
+      </div>
+
+      <p class="small text-muted">
+        Dies ist ein privates, experimentelles Paper-Trading-Projekt. Es gibt
+        keinerlei Garantie für Verfügbarkeit, Korrektheit der Handelslogik
+        oder Datenverlustfreiheit. Jegliche Nutzung erfolgt auf eigenes
+        Risiko und in eigener Verantwortung (Selbsthaftung). Es handelt sich
+        <strong>nicht</strong> um Anlageberatung. Der Zugriff ist bewusst auf
+        Personen beschränkt, die die Passphrase kennen.
+      </p>
+
+      {% if error %}
+      <div class="alert alert-danger text-center">{{ error }}</div>
+      {% endif %}
+
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="mb-3">
+          <label for="passphrase" class="form-label">Passphrase</label>
+          <input
+            type="password"
+            class="form-control"
+            id="passphrase"
+            name="passphrase"
+            autocomplete="off"
+            autofocus
+            required
+          >
+        </div>
+        <button type="submit" class="btn btn-dark w-100">Zugang bestätigen</button>
+      </form>
+
+    </div>
+  </div>
+</div>
+{% endblock %}

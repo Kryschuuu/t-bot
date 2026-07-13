@@ -68,6 +68,16 @@ class TradingBot(threading.Thread):
         self.price_buffer = {s: [] for s in self.symbols}
         self.positions = {}
 
+        # Sichtbarkeit fuer die UI/API (siehe bot_status_api): ohne das
+        # war ein dauerhaft scheiternder fetch_ticker() (z.B. Binance
+        # blockiert die Region/IP von Render mit HTTP 451) fuer den Nutzer
+        # komplett unsichtbar - der Bot "lief", aber es gab weder Fehler
+        # noch Daten irgendwo sichtbar außer im Server-Log.
+        self.last_error = None
+        self.last_error_at = None
+        self.last_success_at = None
+        self.started_at = time.time()
+
         self.loop = asyncio.new_event_loop()
         self.exchange = self._setup_exchange()
 
@@ -109,14 +119,24 @@ class TradingBot(threading.Thread):
                     return_exceptions=True
                 )
 
+                any_success = False
                 for sym, res in zip(self.symbols, results):
                     if isinstance(res, Exception):
                         logger.error(f"{sym} Fehler: {res}")
+                        self.last_error = f"{sym}: {res}"
+                        self.last_error_at = time.time()
+                    else:
+                        any_success = True
+
+                if any_success:
+                    self.last_success_at = time.time()
 
                 await asyncio.sleep(self.config.time_interval)
 
             except Exception as e:
                 logger.exception(f"Main Loop Error: {e}")
+                self.last_error = f"main_loop: {e}"
+                self.last_error_at = time.time()
                 await asyncio.sleep(2)
 
     # =====================================================
@@ -275,6 +295,30 @@ class TradingBotManager:
             bot.stop()
             bot.join()
 
+    def status(self, config_id):
+        """Echter, pro-Konfiguration abrufbarer Bot-Status (fuer bot_status_api).
+
+        Ersetzt das frühere globale, nie aktualisierte BOT_STATE-Dict aus
+        trading/bot_manager.py (siehe Debugging-Protokoll, Fehler "Bot: STOPPED").
+        """
+        bot = self.bots.get(config_id)
+        if not bot:
+            return {
+                "running": False,
+                "config_id": config_id,
+                "started_at": None,
+                "last_error": None,
+                "last_error_at": None,
+                "last_success_at": None,
+            }
+        return {
+            "running": bot.is_alive(),
+            "config_id": config_id,
+            "started_at": bot.started_at,
+            "last_error": bot.last_error,
+            "last_error_at": bot.last_error_at,
+            "last_success_at": bot.last_success_at,
+        }
 
 
 bot_manager = TradingBotManager()

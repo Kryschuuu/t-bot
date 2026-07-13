@@ -42,6 +42,11 @@ services:
         value: "True"
       - key: AUTOSTART_BOTS
         value: "True"
+      - key: PASSPHRASE
+        # WICHTIG: Das ist nur der Test-Default aus dem Debugging-Protokoll
+        # und liegt oeffentlich im Repo. Nach dem ersten Deploy im Render
+        # Dashboard -> Environment auf einen eigenen, geheimen Wert aendern!
+        value: "n7kQ2vX9mP5wL8eRt3bF"
       - key: DATABASE_URL
         fromDatabase:
           name: t-bot-db
