@@ -1,0 +1,61 @@
+/* static/css/custom.css */
+
+body {
+    background-color: #f8f9fa;
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+}
+
+.navbar {
+    background-color: #1e1f21;
+    color: white;
+    padding: 10px 20px;
+}
+
+.navbar a {
+    color: #f1f1f1;
+    text-decoration: none;
+    margin-right: 12px;
+}
+
+.navbar a:hover {
+    color: #0dcaf0;
+}
+
+.container {
+    margin: 20px auto;
+    max-width: 1200px;
+    padding: 15px;
+}
+
+.card {
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+    padding: 20px;
+    margin-bottom: 15px;
+}
+
+.footer {
+    text-align: center;
+    color: #888;
+    margin: 40px 0 10px;
+    font-size: 0.9rem;
+}
+
+/* Hauptüberschriften */
+h1, h2, h3 {
+    color: #222;
+}
+
+/* Tabellen */
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+th, td {
+    padding: 10px;
+    border-bottom: 1px solid #ccc;
+}
