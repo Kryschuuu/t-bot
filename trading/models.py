@@ -72,6 +72,25 @@ class Configuration(models.Model):
         return f"Config {self.id}"
 
 
+class ErrorLog(models.Model):
+    """Persistente Fehler-Log-Eintraege, unabhaengig von Render's kurzlebigen
+    Log-Streams. Wird von trading_bot.py und views.py bei Fehlern befuellt.
+    """
+    configuration = models.ForeignKey(
+        Configuration, on_delete=models.CASCADE,
+        related_name="error_logs", null=True, blank=True
+    )
+    timestamp = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(max_length=100, help_text="z.B. 'trading_bot.main_loop', 'config_activate'")
+    message = models.TextField()
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+    def __str__(self):
+        return f"{self.timestamp} [{self.source}] {self.message[:80]}"
+
+
 class TradingLog(models.Model):
     configuration = models.ForeignKey(Configuration, on_delete=models.CASCADE, related_name="logs")
     timestamp = models.DateTimeField(auto_now_add=True)

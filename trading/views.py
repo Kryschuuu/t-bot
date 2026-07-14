@@ -10,7 +10,7 @@ from django.http import JsonResponse, HttpResponse
 from django.template.loader import render_to_string
 from django.db.models import Sum, F, DecimalField, Max, Min
 from .forms import RegistrationForm, LoginForm, ConfigurationForm, DashboardConfigurationForm, BacktestForm
-from .models import Configuration, TradingLog, DataLog, BacktestTask
+from .models import Configuration, TradingLog, DataLog, BacktestTask, ErrorLog
 from .backtesting import Backtesting
 from .tasks import run_backtest, dispatch_task
 from channels.layers import get_channel_layer
@@ -175,6 +175,7 @@ def config_activate(request, config_id):
             bot_manager.start_bot(config)
         except Exception as e:
             logger.exception("Bot-Start fuer Konfiguration %s fehlgeschlagen: %s", config.id, e)
+            ErrorLog.objects.create(configuration=config, source="views.config_activate", message=str(e)[:4000])
             messages.error(
                 request,
                 f"Bot konnte nicht gestartet werden: {e}. "
@@ -414,45 +415,81 @@ def trades_api(request):
 
 @login_required
 def info_api(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
     logs = (
         TradingLog.objects
         .filter(configuration_id=config_id)
         .order_by("timestamp")
     )
 
+    empty_metrics = {
+        "win_rate": 0, "avg_profit": 0, "avg_win": 0, "avg_loss": 0,
+        "risk_reward": 0, "profit_factor": 0, "max_win": 0, "max_loss": 0,
+    }
+
     if not logs.exists():
         return JsonResponse({
-            "equity": [],
-            "sharpe": 0,
-            "max_drawdown": 0
+            "current_capital": float(config.start_capital),
+            "tank": 0,
+            "buy_orders": 0, "sell_orders": 0,
+            "profitable_sells": 0, "unprofitable_sells": 0,
+            "win_rate": 0, "avg_profit_trade": 0, "avg_win": 0, "avg_loss": 0,
+            "risk_reward": 0, "profit_factor": 0, "biggest_win": 0, "biggest_loss": 0,
+            "sharpe": 0, "sharpe_ratio": 0,
+            "max_drawdown": 0, "current_drawdown": 0,
+            "equity": [], "equity_timestamps": [], "equity_curve": [],
+            "metrics": empty_metrics,
         })
 
     equity = []
     returns = []
+    # BUGFIX: "peak" (das bisherige Allzeithoch des Kapitals) wurde vorher
+    # NIE aktualisiert - dadurch blieb max_drawdown/current_drawdown immer 0
+    # ("Performance Metriken werden nicht berechnet"). peak wird jetzt bei
+    # jedem Log-Eintrag korrekt auf das bisherige Maximum angehoben.
     peak = None
     max_drawdown = Decimal("0")
+    current_drawdown = Decimal("0")
     prev_capital = None
 
+    buy_orders = 0
+    sell_orders = 0
+    profitable_sells = 0
+    unprofitable_sells = 0
+    sell_pls = []
+    last_log = None
+
     for log in logs:
+        last_log = log
         cap = log.current_capital
-        equity.append({
-            "t": log.timestamp.isoformat(),
-            "v": float(cap)
-        })
+        equity.append({"t": log.timestamp.isoformat(), "v": float(cap)})
 
         if prev_capital:
-            r = (cap - prev_capital) / prev_capital
+            r = (cap - prev_capital) / prev_capital if prev_capital != 0 else Decimal("0")
             returns.append(float(r))
-
         prev_capital = cap
 
-        if peak is None or peak <= 0:
-            drawdown = Decimal("0")
-        else:
+        if peak is None or cap > peak:
+            peak = cap
+
+        if peak and peak > 0:
             drawdown = max(Decimal("0"), (peak - cap) / peak)
+        else:
+            drawdown = Decimal("0")
 
         if drawdown > max_drawdown:
             max_drawdown = drawdown
+        current_drawdown = drawdown
+
+        if log.action == "buy":
+            buy_orders += 1
+        elif log.action == "sell":
+            sell_orders += 1
+            sell_pls.append(log.pl_nominal)
+            if log.pl_nominal > 0:
+                profitable_sells += 1
+            else:
+                unprofitable_sells += 1
 
     # Sharpe Ratio
     if len(returns) > 1:
@@ -463,10 +500,53 @@ def info_api(request, config_id):
     else:
         sharpe = 0
 
+    wins = [p for p in sell_pls if p > 0]
+    losses = [p for p in sell_pls if p <= 0]
+    win_rate = (len(wins) / len(sell_pls) * 100) if sell_pls else 0
+    avg_win = float(sum(wins) / len(wins)) if wins else 0
+    avg_loss = float(sum(losses) / len(losses)) if losses else 0
+    avg_profit_trade = float(sum(sell_pls) / len(sell_pls)) if sell_pls else 0
+    risk_reward = (avg_win / abs(avg_loss)) if avg_loss else 0
+    gross_win = float(sum(wins)) if wins else 0
+    gross_loss = float(abs(sum(losses))) if losses else 0
+    profit_factor = (gross_win / gross_loss) if gross_loss else 0
+    biggest_win = float(max(sell_pls)) if sell_pls else 0
+    biggest_loss = float(min(sell_pls)) if sell_pls else 0
+
+    metrics = {
+        "win_rate": round(win_rate, 2),
+        "avg_profit": round(avg_profit_trade, 4),
+        "avg_win": round(avg_win, 4),
+        "avg_loss": round(avg_loss, 4),
+        "risk_reward": round(risk_reward, 2),
+        "profit_factor": round(profit_factor, 2),
+        "max_win": round(biggest_win, 4),
+        "max_loss": round(biggest_loss, 4),
+    }
+
     return JsonResponse({
-        "equity": equity,
+        "current_capital": float(last_log.current_capital),
+        "tank": float(last_log.tank),
+        "buy_orders": buy_orders,
+        "sell_orders": sell_orders,
+        "profitable_sells": profitable_sells,
+        "unprofitable_sells": unprofitable_sells,
+        "win_rate": metrics["win_rate"],
+        "avg_profit_trade": metrics["avg_profit"],
+        "avg_win": metrics["avg_win"],
+        "avg_loss": metrics["avg_loss"],
+        "risk_reward": metrics["risk_reward"],
+        "profit_factor": metrics["profit_factor"],
+        "biggest_win": metrics["max_win"],
+        "biggest_loss": metrics["max_loss"],
         "sharpe": round(sharpe, 3),
-        "max_drawdown": round(float(max_drawdown) * 100, 2)
+        "sharpe_ratio": round(sharpe, 3),
+        "max_drawdown": round(float(max_drawdown) * 100, 2),
+        "current_drawdown": round(float(current_drawdown) * 100, 2),
+        "equity": equity,
+        "equity_timestamps": [e["t"] for e in equity],
+        "equity_curve": [e["v"] for e in equity],
+        "metrics": metrics,
     })
 
 @login_required
@@ -479,12 +559,40 @@ def bot_status_api(request):
     except Configuration.DoesNotExist:
         return JsonResponse({"error": "Configuration not found"}, status=404)
 
+    # Selbstheilung: Auf Render Free Tier kann der ganze Prozess jederzeit neu
+    # starten (Crash, OOM, Redeploy) - dabei geht die In-Memory-Bot-Registry
+    # verloren, aber Configuration.is_running bleibt in der DB stehen. Ohne
+    # diesen Check bliebe der Bot dann für immer "gestoppt", bis man ihn
+    # manuell reaktiviert. Da dieser Endpoint alle 10s vom Dashboard gepollt
+    # wird, reicht das als Selbstheilungs-Mechanismus völlig aus.
+    if config.is_running and not bot_manager.is_running(config.id):
+        try:
+            bot_manager.start_bot(config)
+            logger.info("Bot fuer Konfiguration %s automatisch neu gestartet (Selbstheilung).", config.id)
+        except Exception as e:
+            logger.exception("Automatischer Neustart fuer Konfiguration %s fehlgeschlagen: %s", config.id, e)
+            config.is_running = False
+            config.save(update_fields=["is_running"])
+
     status = bot_manager.status(config.id)
     # DB-Flag ergaenzen: is_running kann True sein, obwohl der Thread in
     # diesem Prozess (z.B. nach einem Render-Neustart) nicht mehr existiert -
-    # das ist ein separates, sichtbares Signal fuer den Nutzer.
+    # das ist ein separates, sichtbares Signal fuer den Nutzer. Nach dem
+    # Selbstheilungs-Versuch oben sollten beide Werte i.d.R. wieder
+    # uebereinstimmen.
     status["is_running_flag"] = config.is_running
     return JsonResponse(status)
+
+
+@login_required
+def error_log_view(request):
+    """Separate Seite mit den letzten Fehlern (aus der DB, nicht aus Render's
+    kurzlebigen Logs) - erleichtert das Debuggen, da Render Free Tier Logs
+    nur begrenzt aufbewahrt.
+    """
+    configs = Configuration.objects.filter(user=request.user)
+    errors = ErrorLog.objects.filter(configuration__in=configs).select_related("configuration")[:300]
+    return render(request, "trading/error_log.html", {"errors": errors})
 
 @login_required
 def logs_api(request, config_id):

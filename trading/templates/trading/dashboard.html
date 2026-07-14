@@ -13,6 +13,34 @@
         Bot aktiv
     </div>
     {% endif %}
+    <div id="bot-status" class="alert alert-secondary text-center">
+    Live-Bot-Status: <span id="bot-running">–</span>
+    <div id="bot-error" class="small text-danger mt-1" style="display:none;"></div>
+    </div>
+
+    <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+        <span class="badge bg-dark p-2" style="font-size: 1rem;"
+              title="Die Exchange, ueber die dieser Bot Preise abruft und Trades simuliert.">
+            🏦 Exchange: {{ config.get_exchange_display }}
+        </span>
+        <span class="badge bg-secondary p-2"
+              title="Wartezeit in Minuten nach dem Aktivieren, bevor der Bot beginnt, Buy-Signale auszufuehren (Preise werden trotzdem schon aufgezeichnet).">
+            ⏳ Countdown: {{ config.countdown }} min
+        </span>
+        <span class="badge bg-secondary p-2"
+              title="Wenn aktiviert, werden die Indikatoren (NDA/DeltaDelta/Beschleunigung) nach jedem Trade zurueckgesetzt, statt kontinuierlich weiterzulaufen.">
+            🔄 Countdown-Reset-Indikatoren: {% if config.countdown_reset_indicators %}An{% else %}Aus{% endif %}
+        </span>
+        <span class="badge bg-secondary p-2"
+              title="Wie oft (in Sekunden) der Bot pro Zyklus neue Preise abruft und die Handelslogik auswertet.">
+            ⏱️ Time Interval: {{ config.time_interval }} s
+        </span>
+        <span class="badge bg-secondary p-2"
+              title="Prozentualer Verlust ab dem automatisch verkauft wird (Stop-Loss-Schwelle fuer den 'Tank').">
+            🛑 Sales-Stop-Threshold: {{ config.sales_stop_threshold }} %
+        </span>
+    </div>
+
     {% if config.api_key != Null %}
     <div class="alert alert-success text-center" role="alert">
         LIVE - HANDEL aktiv - apis vorhanden
@@ -183,50 +211,6 @@
         </form>
         </div>
     </div>
-    <p><br></p>
-    <div class="mt-4">
-        <center><h4>Trading Logbuch</h4></center>
-        <div class="table-responsive">
-            <table class="table table-striped table-bordered">
-                <thead class="table-light">
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Datum</th>
-                        <th>Uhrzeit</th>
-                        <th>Action</th>
-                        <th>Price</th>
-                        <th>Fee</th>
-                        <th>Amount</th>
-                        <th>Order ID</th>
-                        <th>P/L Nominal</th>
-                        <th>P/L Relative</th>
-                        <th>Total P/L</th>
-                        <th>Aktuelles Kapital</th>
-                        <th>Tank</th>
-                    </tr>
-                </thead>
-                <tbody id="trading-log-body">
-                    {% for log in logs %}
-                    <tr class="{% if log.action == 'buy' %}table-success{% elif log.action == 'sell' %}table-danger{% endif %}">
-                        <td>{{ log.symbol }}</td>
-                        <td>{{ log.date }}</td>
-                        <td>{{ log.time }}</td>
-                        <td>{{ log.action }}</td>
-                        <td>{{ log.price }}</td>
-                        <td>{{ log.fee_amount }}</td>
-                        <td>{{ log.amount }}</td>
-                        <td>{{ log.order_id }}</td>
-                        <td>{{ log.pl_nominal }}</td>
-                        <td>{{ log.pl_relative }}</td>
-                        <td>{{ log.total_pl }}</td>
-                        <td>{{ log.current_capital }}</td>
-                        <td>{{ log.tank }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
     {% endif %}
     <p><br></p>
     <ul class="nav nav-tabs" id="symbolTabs">
@@ -304,9 +288,49 @@
         </div>
     </div>
 
-    <div id="bot-status" class="alert alert-secondary">
-    Bot: <span id="bot-running">–</span>
-    <div id="bot-error" class="small text-danger mt-1" style="display:none;"></div>
+    <p><br></p>
+    <div class="mt-4">
+        <center><h4>Trading Logbuch</h4></center>
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered">
+                <thead class="table-light">
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Datum</th>
+                        <th>Uhrzeit</th>
+                        <th>Action</th>
+                        <th>Price</th>
+                        <th>Fee</th>
+                        <th>Amount</th>
+                        <th>Order ID</th>
+                        <th>P/L Nominal</th>
+                        <th>P/L Relative</th>
+                        <th>Total P/L</th>
+                        <th>Aktuelles Kapital</th>
+                        <th>Tank</th>
+                    </tr>
+                </thead>
+                <tbody id="trading-log-body">
+                    {% for log in logs %}
+                    <tr class="{% if log.action == 'buy' %}table-success{% elif log.action == 'sell' %}table-danger{% endif %}">
+                        <td>{{ log.symbol }}</td>
+                        <td>{{ log.date }}</td>
+                        <td>{{ log.time }}</td>
+                        <td>{{ log.action }}</td>
+                        <td>{{ log.price }}</td>
+                        <td>{{ log.fee_amount }}</td>
+                        <td>{{ log.amount }}</td>
+                        <td>{{ log.order_id }}</td>
+                        <td>{{ log.pl_nominal }}</td>
+                        <td>{{ log.pl_relative }}</td>
+                        <td>{{ log.total_pl }}</td>
+                        <td>{{ log.current_capital }}</td>
+                        <td>{{ log.tank }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 
 <script>
@@ -324,6 +348,10 @@ function pollBotStatus() {
         } else {
             errEl.style.display = "none";
         }
+        // Konsistenz: Wenn der Live-Status STOPPED sagt, aber die Konfiguration
+        // laut Server-Render noch "aktiv" markiert war, neu laden, sobald sich
+        // is_running_flag geaendert hat, damit das obere Badge synchron bleibt
+        // (Selbstheilung passiert serverseitig in bot_status_api).
       })
       .catch(err => console.error("Fehler beim Abrufen des Bot-Status: ", err));
 }
@@ -368,6 +396,22 @@ setInterval(pollBotStatus, 10000);
         var div_DVA_prev_NDA = data.map(item => parseFloat(item.div_DVA_prev_NDA));
         var nda = data.map(item => parseFloat(item.nda));
 
+        // Zeitluecken im Preis (z.B. waehrend ein Trade verarbeitet wird)
+        // werden von Plotly sonst als gerade diagonale Linie "verbunden" -
+        // das sah wie eine stoerende Linie zwischen Buy/Sell-Dreiecken aus,
+        // obwohl die Buy/Sell-Traces selbst gar keine Linie zeichnen (mode:
+        // 'markers'). Fix: Bei Luecken > 3x time_interval einen null-Wert
+        // einfuegen, damit Plotly die Linie dort unterbricht statt zu
+        // interpolieren.
+        var maxGapMs = Math.max({{ config.time_interval|default:2 }} * 1000 * 3, 10000);
+        var pricesForLine = prices.slice();
+        for (var gi = 1; gi < timestamps.length; gi++) {
+            var gapMs = new Date(timestamps[gi]) - new Date(timestamps[gi - 1]);
+            if (gapMs > maxGapMs) {
+                pricesForLine[gi - 1] = null;
+            }
+        }
+
         // Überprüfen, ob 'nda' in den Daten vorhanden ist
         if (!data[0].hasOwnProperty('nda')) {
             console.error("Daten enthalten kein 'nda'-Feld");
@@ -396,12 +440,13 @@ setInterval(pollBotStatus, 10000);
         // **Traces definieren**
         var tracePrice = {
             x: timestamps,
-            y: prices,
+            y: pricesForLine,
             mode: 'lines+markers',
             type: 'scattergl',
             name: symbol + ' Preis: ' + latestPrice.toFixed(8),
             line: { width: 2, color: 'rgba(0, 51, 102, 0.8)' },
-            marker: { size: 2, color: 'rgba(0, 51, 102, 0.5)' }
+            marker: { size: 2, color: 'rgba(0, 51, 102, 0.5)' },
+            connectgaps: false
         };
 
         var traceDelta = {
@@ -446,6 +491,7 @@ setInterval(pollBotStatus, 10000);
             mode: 'markers',
             type: 'scattergl',
             marker: { symbol: 'triangle-up', color: 'green', size: 16 },
+            line: { width: 0 },
             name: 'Buy Trades'
         };
         var traceSell = {
@@ -454,6 +500,7 @@ setInterval(pollBotStatus, 10000);
             mode: 'markers',
             type: 'scattergl',
             marker: { symbol: 'triangle-down', color: 'red', size: 16 },
+            line: { width: 0 },
             name: 'Sell Trades'
         };
 
@@ -725,14 +772,48 @@ setInterval(pollBotStatus, 10000);
         {% endif %}
     });
 
+    // Ordnet Buy/Sell-Trades chronologisch nach dem FIFO-Prinzip (pro Symbol)
+    // einander zu und vergibt jedem Paar dieselbe Farbe (linker Rahmen der
+    // Tabellenzeile) - so ist auf einen Blick erkennbar, welcher Sell zu
+    // welchem Buy gehoert, ohne das Datenmodell aendern zu muessen.
+    var PAIR_COLORS = [
+        "#4e79a7", "#f28e2b", "#59a14f", "#e15759",
+        "#76b7b2", "#edc948", "#b07aa1", "#ff9da7"
+    ];
+    function computeTradePairColors(logs) {
+        var openBuys = {};   // symbol -> Liste offener Buy-Indices (FIFO-Warteschlange)
+        var colorByIndex = {};
+        var nextPairColor = 0;
+        logs.forEach(function(log, idx) {
+            var sym = log.symbol;
+            if (!openBuys[sym]) openBuys[sym] = [];
+            if (log.action === "buy") {
+                var color = PAIR_COLORS[nextPairColor % PAIR_COLORS.length];
+                nextPairColor++;
+                colorByIndex[idx] = color;
+                openBuys[sym].push(color);
+            } else if (log.action === "sell") {
+                if (openBuys[sym].length > 0) {
+                    colorByIndex[idx] = openBuys[sym].shift();
+                } else {
+                    // Sell ohne bekannten Buy (z.B. History-Anfang abgeschnitten)
+                    colorByIndex[idx] = "#adb5bd";
+                }
+            }
+        });
+        return colorByIndex;
+    }
+
     function updateTradingLog() {
         fetch("{% url 'logs_api' config.id %}")
             .then(response => response.json())
             .then(data => {
                 var tbody = document.getElementById('trading-log-body');
+                var pairColors = computeTradePairColors(data);
                 var rows = "";
-                data.forEach(function(log) {
-                    rows += "<tr class='" + (log.action === "buy" ? "table-success" : (log.action === "sell" ? "table-danger" : "")) + "'>" +
+                data.forEach(function(log, idx) {
+                    var borderStyle = pairColors[idx] ? ("border-left:5px solid " + pairColors[idx] + ";") : "";
+                    rows += "<tr style='" + borderStyle + "' class='" + (log.action === "buy" ? "table-success" : (log.action === "sell" ? "table-danger" : "")) + "'>" +
                         "<td>" + log.symbol + "</td>" +
                         "<td>" + log.date + "</td>" +
                         "<td>" + log.time + "</td>" +                        
@@ -756,7 +837,6 @@ setInterval(pollBotStatus, 10000);
     function updateInfoPanel() {
     fetch("{% url 'info_api' config.id %}")
         .then(response => response.json())
-        .then(r => r.json())
         .then(data => {
             document.getElementById('current-capital').innerText = data.current_capital;
             document.getElementById('tank').innerText = data.tank;
@@ -835,6 +915,7 @@ setInterval(pollBotStatus, 10000);
         updateInfoPanel();
     }
 
+    updateDashboardData();
     setInterval(updateDashboardData, 5000);
 </script>
 <script>

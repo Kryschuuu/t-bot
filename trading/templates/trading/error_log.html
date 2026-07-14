@@ -1,0 +1,37 @@
+{% extends "trading/base.html" %}
+{% block content %}
+<div class="container mt-4">
+  <h2>Exception-Log</h2>
+  <p class="text-muted">
+    Persistente Fehler-Historie aus der Datenbank (unabhängig von Render's
+    kurzlebigen Server-Logs). Zeigt die letzten 300 Einträge über alle
+    eigenen Konfigurationen.
+  </p>
+  <a href="{% url 'dashboard' %}" class="btn btn-secondary mb-3">← Zurück zum Dashboard</a>
+
+  {% if not errors %}
+    <div class="alert alert-success">Keine Fehler protokolliert. 🎉</div>
+  {% else %}
+  <table class="table table-sm table-striped">
+    <thead>
+      <tr>
+        <th>Zeitpunkt</th>
+        <th>Konfiguration</th>
+        <th>Quelle</th>
+        <th>Meldung</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in errors %}
+      <tr>
+        <td class="text-nowrap">{{ e.timestamp }}</td>
+        <td>{{ e.configuration_id|default:"–" }}</td>
+        <td><code>{{ e.source }}</code></td>
+        <td style="white-space: pre-wrap; word-break: break-word;">{{ e.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

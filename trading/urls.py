@@ -30,4 +30,5 @@ urlpatterns = [
     # technische Indikatoren Analyse 
     path('analyse/', views.analyse_view, name='analyse'),
     path("api/bot/status/", views.bot_status_api, name="bot_status_api"),
+    path("errors/", views.error_log_view, name="error_log"),
 ]

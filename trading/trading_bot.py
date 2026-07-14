@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from asgiref.sync import sync_to_async
 from django.db import IntegrityError, transaction
 
-from .models import Configuration, DataLog, TradingLog
+from .models import Configuration, DataLog, TradingLog, ErrorLog
 
 logger = logging.getLogger("trading")
 
@@ -17,12 +17,12 @@ logger = logging.getLogger("trading")
 # DB-HILFSFUNKTIONEN (ASYNC-SAFE)
 # =========================================================
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def db_get_config(config_id):
     return Configuration.objects.get(id=config_id)
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def db_create_datalog_safe(**kwargs):
     try:
         with transaction.atomic():
@@ -32,7 +32,7 @@ def db_create_datalog_safe(**kwargs):
         pass
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def db_create_tradinglog_safe(**kwargs):
     try:
         with transaction.atomic():
@@ -41,7 +41,16 @@ def db_create_tradinglog_safe(**kwargs):
         pass
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
+def db_log_error(config_id, source, message):
+    try:
+        ErrorLog.objects.create(configuration_id=config_id, source=source, message=str(message)[:4000])
+    except Exception:
+        # Fehler-Logging darf selbst niemals den Bot zum Absturz bringen
+        pass
+
+
+@sync_to_async(thread_sensitive=False)
 def db_get_recent_deltadelta(symbol, config_id, limit=10):
     return list(
         DataLog.objects.filter(
@@ -125,6 +134,7 @@ class TradingBot(threading.Thread):
                         logger.error(f"{sym} Fehler: {res}")
                         self.last_error = f"{sym}: {res}"
                         self.last_error_at = time.time()
+                        await db_log_error(self.config_id, "trading_bot.process_symbol", f"{sym}: {res}")
                     else:
                         any_success = True
 
@@ -137,6 +147,7 @@ class TradingBot(threading.Thread):
                 logger.exception(f"Main Loop Error: {e}")
                 self.last_error = f"main_loop: {e}"
                 self.last_error_at = time.time()
+                await db_log_error(self.config_id, "trading_bot.main_loop", str(e))
                 await asyncio.sleep(2)
 
     # =====================================================
