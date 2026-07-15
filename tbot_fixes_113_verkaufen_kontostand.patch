@@ -1,0 +1,332 @@
+diff --git a/trading/templates/trading/dashboard.html b/trading/templates/trading/dashboard.html
+index 7628995..b0245cc 100644
+--- a/trading/templates/trading/dashboard.html
++++ b/trading/templates/trading/dashboard.html
+@@ -308,6 +308,7 @@
+                         <th>Total P/L</th>
+                         <th>Aktuelles Kapital</th>
+                         <th>Tank</th>
++                        <th>Aktion</th>
+                     </tr>
+                 </thead>
+                 <tbody id="trading-log-body">
+@@ -326,6 +327,7 @@
+                         <td>{{ log.total_pl }}</td>
+                         <td>{{ log.current_capital }}</td>
+                         <td>{{ log.tank }}</td>
++                        <td></td>
+                     </tr>
+                     {% endfor %}
+                 </tbody>
+@@ -804,15 +806,77 @@ setInterval(pollBotStatus, 10000);
+         return colorByIndex;
+     }
+ 
++    // Ermittelt pro Symbol den Index des Buy-Logeintrags, der aktuell noch
++    // offen ist (letzte Aktion fuer dieses Symbol war "buy", noch kein
++    // dazugehoeriger "sell"). Der Bot haelt pro Symbol immer nur EINE
++    // offene Position, daher reicht "letzte Aktion je Symbol" hier aus.
++    function computeOpenBuyIndices(logs) {
++        var openIndexBySymbol = {};
++        logs.forEach(function(log, idx) {
++            if (log.action === "buy") {
++                openIndexBySymbol[log.symbol] = idx;
++            } else if (log.action === "sell") {
++                delete openIndexBySymbol[log.symbol];
++            }
++        });
++        var openIndices = {};
++        Object.keys(openIndexBySymbol).forEach(function(sym) {
++            openIndices[openIndexBySymbol[sym]] = true;
++        });
++        return openIndices;
++    }
++
++    function escapeHtml(str) {
++        var div = document.createElement("div");
++        div.textContent = str;
++        return div.innerHTML;
++    }
++
++    function manualSell(configId, symbol, btn) {
++        if (!confirm("Offene Position " + symbol + " jetzt manuell verkaufen?")) {
++            return;
++        }
++        btn.disabled = true;
++        btn.innerText = "Verkaufe...";
++        fetch("/api/manual_sell/" + configId + "/?symbol=" + encodeURIComponent(symbol))
++            .then(response => response.json().then(data => ({ ok: response.ok, data: data })))
++            .then(function(result) {
++                if (!result.ok || result.data.status !== "ok") {
++                    alert("Verkauf fehlgeschlagen: " + (result.data.message || "Unbekannter Fehler"));
++                    btn.disabled = false;
++                    btn.innerText = "Verkaufen";
++                    return;
++                }
++                // Log-Tabelle und Info-Panel sofort aktualisieren - der
++                // Button verschwindet dabei automatisch, da das Symbol
++                // jetzt einen "sell" als letzte Aktion hat.
++                updateTradingLog();
++                updateInfoPanel();
++            })
++            .catch(function(error) {
++                console.error("Fehler beim manuellen Verkauf:", error);
++                alert("Verkauf fehlgeschlagen (Netzwerkfehler).");
++                btn.disabled = false;
++                btn.innerText = "Verkaufen";
++            });
++    }
++
+     function updateTradingLog() {
+         fetch("{% url 'logs_api' config.id %}")
+             .then(response => response.json())
+             .then(data => {
+                 var tbody = document.getElementById('trading-log-body');
+                 var pairColors = computeTradePairColors(data);
++                var openBuyIndices = computeOpenBuyIndices(data);
++                var configId = {{ config.id }};
+                 var rows = "";
+                 data.forEach(function(log, idx) {
+                     var borderStyle = pairColors[idx] ? ("border-left:5px solid " + pairColors[idx] + ";") : "";
++                    var actionCell = "";
++                    if (openBuyIndices[idx]) {
++                        actionCell = "<button type='button' class='btn btn-sm btn-warning' " +
++                            "onclick='manualSell(" + configId + ", \"" + escapeHtml(log.symbol) + "\", this)'>Verkaufen</button>";
++                    }
+                     rows += "<tr style='" + borderStyle + "' class='" + (log.action === "buy" ? "table-success" : (log.action === "sell" ? "table-danger" : "")) + "'>" +
+                         "<td>" + log.symbol + "</td>" +
+                         "<td>" + log.date + "</td>" +
+@@ -827,6 +891,7 @@ setInterval(pollBotStatus, 10000);
+                         "<td>" + log.total_pl + "</td>" +
+                         "<td>" + log.current_capital + "</td>" +
+                         "<td>" + log.tank + "</td>" +
++                        "<td>" + actionCell + "</td>" +
+                         "</tr>";
+                 });
+                 tbody.innerHTML = rows;
+diff --git a/trading/trading_bot.py b/trading/trading_bot.py
+index 20ba6ce..096b814 100644
+--- a/trading/trading_bot.py
++++ b/trading/trading_bot.py
+@@ -77,6 +77,15 @@ class TradingBot(threading.Thread):
+         self.price_buffer = {s: [] for s in self.symbols}
+         self.positions = {}
+ 
++        # Laufendes, realisiertes Gesamtergebnis (Summe aller Sell-P/L) -
++        # wird fuer current_capital/tank in jedem TradingLog-Eintrag
++        # gebraucht (siehe execute_trade). BUGFIX: vorher wurde hier immer
++        # fest Decimal(0) geschrieben, wodurch "Aktuelles Kapital" und
++        # "Tank" im Dashboard nach jedem Trade sofort wieder auf 0
++        # zurueckfielen und Sharpe/Drawdown (die auf current_capital
++        # aufbauen) nie sinnvolle Werte bekamen.
++        self.realized_pl = Decimal(0)
++
+         # Sichtbarkeit fuer die UI/API (siehe bot_status_api): ohne das
+         # war ein dauerhaft scheiternder fetch_ticker() (z.B. Binance
+         # blockiert die Region/IP von Render mit HTTP 451) fuer den Nutzer
+@@ -87,7 +96,17 @@ class TradingBot(threading.Thread):
+         self.last_success_at = None
+         self.started_at = time.time()
+ 
+-        self.loop = asyncio.new_event_loop()
++        # BUGFIX (Exit 137 / OOM-Kill): self.loop = asyncio.new_event_loop()
++        # stand vorher hier im Konstruktor, der im Django-Request-Thread
++        # (Selbstheilung/config_activate) laeuft. Jede neu erzeugte Event-
++        # Loop oeffnet sofort OS-Ressourcen (epoll-FD, self-pipe). Schlug
++        # danach z.B. _setup_exchange() fehl (falscher Exchange-Name in der
++        # Konfiguration), wurde das TradingBot-Objekt verworfen, OHNE dass
++        # die bereits geoeffnete Loop je geschlossen wurde - ein Leck bei
++        # jedem fehlgeschlagenen (Neu-)Start. Die Loop wird jetzt stattdessen
++        # erst in run() erzeugt, also im eigenen Bot-Thread, und in einem
++        # finally-Block wieder geschlossen (siehe run()/stop()).
++        self.loop = None
+         self.exchange = self._setup_exchange()
+ 
+         self.start_time = time.time() + config.countdown * 60
+@@ -108,8 +127,24 @@ class TradingBot(threading.Thread):
+     # -----------------------------------------------------
+ 
+     def run(self):
++        self.loop = asyncio.new_event_loop()
+         asyncio.set_event_loop(self.loop)
+-        self.loop.run_until_complete(self.main_loop())
++        try:
++            self.loop.run_until_complete(self.main_loop())
++        finally:
++            # Sauber aufraeumen, statt die Loop (und damit ihre offenen
++            # FDs) einfach haengen zu lassen - relevant vor allem bei
++            # haeufigem Start/Stop durch die Selbstheilung auf Render.
++            try:
++                self.loop.run_until_complete(self.loop.shutdown_asyncgens())
++            except Exception:
++                pass
++            try:
++                if hasattr(self.exchange, "close"):
++                    self.loop.run_until_complete(self.exchange.close())
++            except Exception:
++                pass
++            self.loop.close()
+ 
+     def stop(self):
+         self.running = False
+@@ -141,7 +176,17 @@ class TradingBot(threading.Thread):
+                 if any_success:
+                     self.last_success_at = time.time()
+ 
+-                await asyncio.sleep(self.config.time_interval)
++                # WICHTIG: nicht in einem einzigen grossen asyncio.sleep()
++                # warten, sondern in kleinen 1s-Schritten und dabei
++                # self.running immer wieder pruefen. Sonst reagiert der
++                # Thread erst nach bis zu time_interval Sekunden auf
++                # stop() - und genau das war der Grund fuer die 502-Fehler
++                # nach dem Logout/Deaktivieren (siehe TradingBotManager.stop_bot).
++                remaining = self.config.time_interval
++                while remaining > 0 and self.running:
++                    step = min(1, remaining)
++                    await asyncio.sleep(step)
++                    remaining -= step
+ 
+             except Exception as e:
+                 logger.exception(f"Main Loop Error: {e}")
+@@ -261,6 +306,14 @@ class TradingBot(threading.Thread):
+         if side == "sell":
+             entry = self.positions.pop(symbol)
+             pl_nominal = (price - entry["price"]) * amount - fee
++            self.realized_pl += pl_nominal
++
++        # BUGFIX: current_capital/tank/total_pl wurden vorher fest auf 0
++        # bzw. auf den einzelnen Trade-P/L geschrieben, statt den
++        # laufenden Gesamtstand ueber alle bisherigen Trades abzubilden.
++        # Dashboard/Equity-Kurve/Sharpe erwarten hier einen echten,
++        # monoton fortgeschriebenen Snapshot pro Log-Zeile.
++        current_capital = self.config.start_capital + self.realized_pl
+ 
+         await db_create_tradinglog_safe(
+             configuration_id=self.config_id,
+@@ -271,9 +324,9 @@ class TradingBot(threading.Thread):
+             fee_amount=fee,
+             pl_nominal=pl_nominal,
+             pl_relative=(pl_nominal / (price * amount) * 100) if price * amount else Decimal(0),
+-            total_pl=pl_nominal,
+-            current_capital=Decimal(0),
+-            tank=pl_nominal,
++            total_pl=self.realized_pl,
++            current_capital=current_capital,
++            tank=self.realized_pl,
+             order_id=f"sim_{side}_{time.time()}"
+         )
+ 
+@@ -301,10 +354,42 @@ class TradingBotManager:
+         self.bots[config.id] = bot
+ 
+     def stop_bot(self, config):
++        # WICHTIG: hier NICHT bot.join() im aufrufenden Thread ausfuehren!
++        # Dieser aufrufende Thread ist bei einem Django-View-Aufruf (z.B.
++        # config_deactivate) derselbe einzelne "thread_sensitive"-Worker-
++        # Thread, den Django/Channels fuer ALLE synchronen Views im ganzen
++        # Prozess gemeinsam benutzt. Ein blockierendes join() dort legt
++        # fuer die gesamte Laufzeit des Joins (bis zu time_interval + der
++        # Dauer eines evtl. haengenden fetch_ticker()-Calls) JEDEN anderen
++        # synchronen Request lahm - u.a. auch /logout/ und Render's eigenen
++        # Health-Check. Das war die Ursache der 502-Fehler nach dem
++        # Ausloggen/Deaktivieren.
++        #
++        # Stattdessen: sofort aus der Registry entfernen (damit is_running()
++        # ab jetzt korrekt False liefert) und das eigentliche Stoppen des
++        # Threads im Hintergrund erledigen, ohne den Aufrufer zu blockieren.
+         bot = self.bots.pop(config.id, None)
+         if bot:
+             bot.stop()
+-            bot.join()
++            threading.Thread(target=bot.join, kwargs={"timeout": 30}, daemon=True).start()
++
++    def manual_sell(self, config_id, symbol):
++        """Verkauft eine aktuell offene Position manuell (Button im Trading-
++        Logbuch). Muss cross-thread in die eigene Event-Loop des Bots
++        eingeplant werden, da TradingBot in seinem eigenen Thread/Loop laeuft.
++        """
++        bot = self.bots.get(config_id)
++        if not bot or not bot.is_alive() or bot.loop is None:
++            raise ValueError("Bot laeuft nicht - manueller Verkauf nicht moeglich.")
++        if symbol not in bot.positions:
++            raise ValueError(f"Keine offene Position fuer {symbol}.")
++
++        future = asyncio.run_coroutine_threadsafe(bot.execute_trade(symbol, "sell"), bot.loop)
++        # execute_trade macht selbst keine Netzwerk-Calls (nutzt den
++        # letzten bekannten Preis aus dem Buffer), daher ist ein kurzer
++        # Timeout hier unproblematisch und blockiert den Django-Request
++        # nur minimal.
++        future.result(timeout=10)
+ 
+     def status(self, config_id):
+         """Echter, pro-Konfiguration abrufbarer Bot-Status (fuer bot_status_api).
+diff --git a/trading/urls.py b/trading/urls.py
+index 436062c..3102c88 100644
+--- a/trading/urls.py
++++ b/trading/urls.py
+@@ -20,6 +20,13 @@ urlpatterns = [
+     path('reset_log/<int:config_id>/', views.reset_log, name='reset_log'),
+     path('api/info/<int:config_id>/', views.info_api, name='info_api'),
+     path('api/logs/<int:config_id>/', views.logs_api, name='logs_api'),
++    # WICHTIG: Symbol als Query-Parameter, nicht als Pfadsegment - Symbole
++    # wie "BTC/USDT" enthalten einen Slash, der als Pfadsegment (auch
++    # %2F-kodiert) von den meisten Servern schon vor dem Django-Routing
++    # decodiert wird und die URL sonst nicht matcht (-> 404 -> "Verkauf
++    # fehlgeschlagen (Netzwerkfehler)", da die HTML-Fehlerseite kein
++    # gueltiges JSON ist).
++    path('api/manual_sell/<int:config_id>/', views.manual_sell_view, name='manual_sell'),
+     path('api/data_logs/', views.data_logs_api, name='data_logs_api'),
+     path('api/trades/', views.trades_api, name='trades_api'),
+     path('report/<int:config_id>/', views.generate_report, name='generate_report'),
+diff --git a/trading/views.py b/trading/views.py
+index be1948d..096e6b7 100644
+--- a/trading/views.py
++++ b/trading/views.py
+@@ -464,7 +464,7 @@ def info_api(request, config_id):
+         cap = log.current_capital
+         equity.append({"t": log.timestamp.isoformat(), "v": float(cap)})
+ 
+-        if prev_capital:
++        if prev_capital is not None:
+             r = (cap - prev_capital) / prev_capital if prev_capital != 0 else Decimal("0")
+             returns.append(float(r))
+         prev_capital = cap
+@@ -608,6 +608,7 @@ def logs_api(request, config_id):
+     data = []
+     for log in logs:
+         data.append({
++            "id": log.id,
+             "timestamp": log.timestamp.isoformat(),
+             "date": log.timestamp.date().isoformat(),
+             "time": log.timestamp.time().strftime("%H:%M:%S"),
+@@ -625,6 +626,30 @@ def logs_api(request, config_id):
+         })
+     return JsonResponse(data, safe=False)
+ 
++@login_required
++def manual_sell_view(request, config_id):
++    """Manueller Verkauf einer noch offenen Position (Button im Trading-
++    Logbuch bei einem Buy, dem noch kein Sell folgt). Verkauft ueber den
++    laufenden Bot zum letzten bekannten Kurs, genau wie ein automatischer
++    Sell durch die Trading-Logik.
++
++    Symbol kommt bewusst als Query-Parameter (?symbol=BTC/USDT), nicht als
++    Pfadsegment - siehe Kommentar in urls.py.
++    """
++    config = get_object_or_404(Configuration, id=config_id, user=request.user)
++    symbol = request.GET.get("symbol")
++    if not symbol:
++        return JsonResponse({"status": "error", "message": "symbol fehlt"}, status=400)
++    try:
++        bot_manager.manual_sell(config.id, symbol)
++        return JsonResponse({"status": "ok"})
++    except ValueError as e:
++        return JsonResponse({"status": "error", "message": str(e)}, status=400)
++    except Exception as e:
++        logger.exception("Manueller Verkauf fuer Konfiguration %s (%s) fehlgeschlagen: %s", config.id, symbol, e)
++        ErrorLog.objects.create(configuration=config, source="views.manual_sell_view", message=str(e)[:4000])
++        return JsonResponse({"status": "error", "message": "Verkauf fehlgeschlagen. Siehe Fehler-Log."}, status=500)
++
+ @login_required
+ def generate_report(request, config_id):
+     """
