@@ -141,7 +141,17 @@ class TradingBot(threading.Thread):
                 if any_success:
                     self.last_success_at = time.time()
 
-                await asyncio.sleep(self.config.time_interval)
+                # WICHTIG: nicht in einem einzigen grossen asyncio.sleep()
+                # warten, sondern in kleinen 1s-Schritten und dabei
+                # self.running immer wieder pruefen. Sonst reagiert der
+                # Thread erst nach bis zu time_interval Sekunden auf
+                # stop() - und genau das war der Grund fuer die 502-Fehler
+                # nach dem Logout/Deaktivieren (siehe TradingBotManager.stop_bot).
+                remaining = self.config.time_interval
+                while remaining > 0 and self.running:
+                    step = min(1, remaining)
+                    await asyncio.sleep(step)
+                    remaining -= step
 
             except Exception as e:
                 logger.exception(f"Main Loop Error: {e}")
@@ -301,10 +311,42 @@ class TradingBotManager:
         self.bots[config.id] = bot
 
     def stop_bot(self, config):
+        # WICHTIG: hier NICHT bot.join() im aufrufenden Thread ausfuehren!
+        # Dieser aufrufende Thread ist bei einem Django-View-Aufruf (z.B.
+        # config_deactivate) derselbe einzelne "thread_sensitive"-Worker-
+        # Thread, den Django/Channels fuer ALLE synchronen Views im ganzen
+        # Prozess gemeinsam benutzt. Ein blockierendes join() dort legt
+        # fuer die gesamte Laufzeit des Joins (bis zu time_interval + der
+        # Dauer eines evtl. haengenden fetch_ticker()-Calls) JEDEN anderen
+        # synchronen Request lahm - u.a. auch /logout/ und Render's eigenen
+        # Health-Check. Das war die Ursache der 502-Fehler nach dem
+        # Ausloggen/Deaktivieren.
+        #
+        # Stattdessen: sofort aus der Registry entfernen (damit is_running()
+        # ab jetzt korrekt False liefert) und das eigentliche Stoppen des
+        # Threads im Hintergrund erledigen, ohne den Aufrufer zu blockieren.
         bot = self.bots.pop(config.id, None)
         if bot:
             bot.stop()
-            bot.join()
+            threading.Thread(target=bot.join, kwargs={"timeout": 30}, daemon=True).start()
+
+    def manual_sell(self, config_id, symbol):
+        """Verkauft eine aktuell offene Position manuell (Button im Trading-
+        Logbuch). Muss cross-thread in die eigene Event-Loop des Bots
+        eingeplant werden, da TradingBot in seinem eigenen Thread/Loop laeuft.
+        """
+        bot = self.bots.get(config_id)
+        if not bot or not bot.is_alive():
+            raise ValueError("Bot laeuft nicht - manueller Verkauf nicht moeglich.")
+        if symbol not in bot.positions:
+            raise ValueError(f"Keine offene Position fuer {symbol}.")
+
+        future = asyncio.run_coroutine_threadsafe(bot.execute_trade(symbol, "sell"), bot.loop)
+        # execute_trade macht selbst keine Netzwerk-Calls (nutzt den
+        # letzten bekannten Preis aus dem Buffer), daher ist ein kurzer
+        # Timeout hier unproblematisch und blockiert den Django-Request
+        # nur minimal.
+        future.result(timeout=10)
 
     def status(self, config_id):
         """Echter, pro-Konfiguration abrufbarer Bot-Status (fuer bot_status_api).

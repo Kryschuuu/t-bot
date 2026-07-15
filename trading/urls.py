@@ -20,6 +20,7 @@ urlpatterns = [
     path('reset_log/<int:config_id>/', views.reset_log, name='reset_log'),
     path('api/info/<int:config_id>/', views.info_api, name='info_api'),
     path('api/logs/<int:config_id>/', views.logs_api, name='logs_api'),
+    path('api/manual_sell/<int:config_id>/<str:symbol>/', views.manual_sell_view, name='manual_sell'),
     path('api/data_logs/', views.data_logs_api, name='data_logs_api'),
     path('api/trades/', views.trades_api, name='trades_api'),
     path('report/<int:config_id>/', views.generate_report, name='generate_report'),

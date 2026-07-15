@@ -308,6 +308,7 @@
                         <th>Total P/L</th>
                         <th>Aktuelles Kapital</th>
                         <th>Tank</th>
+                        <th>Aktion</th>
                     </tr>
                 </thead>
                 <tbody id="trading-log-body">
@@ -326,6 +327,7 @@
                         <td>{{ log.total_pl }}</td>
                         <td>{{ log.current_capital }}</td>
                         <td>{{ log.tank }}</td>
+                        <td></td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -804,15 +806,77 @@ setInterval(pollBotStatus, 10000);
         return colorByIndex;
     }
 
+    // Ermittelt pro Symbol den Index des Buy-Logeintrags, der aktuell noch
+    // offen ist (letzte Aktion fuer dieses Symbol war "buy", noch kein
+    // dazugehoeriger "sell"). Der Bot haelt pro Symbol immer nur EINE
+    // offene Position, daher reicht "letzte Aktion je Symbol" hier aus.
+    function computeOpenBuyIndices(logs) {
+        var openIndexBySymbol = {};
+        logs.forEach(function(log, idx) {
+            if (log.action === "buy") {
+                openIndexBySymbol[log.symbol] = idx;
+            } else if (log.action === "sell") {
+                delete openIndexBySymbol[log.symbol];
+            }
+        });
+        var openIndices = {};
+        Object.keys(openIndexBySymbol).forEach(function(sym) {
+            openIndices[openIndexBySymbol[sym]] = true;
+        });
+        return openIndices;
+    }
+
+    function escapeHtml(str) {
+        var div = document.createElement("div");
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function manualSell(configId, symbol, btn) {
+        if (!confirm("Offene Position " + symbol + " jetzt manuell verkaufen?")) {
+            return;
+        }
+        btn.disabled = true;
+        btn.innerText = "Verkaufe...";
+        fetch("/api/manual_sell/" + configId + "/" + encodeURIComponent(symbol) + "/")
+            .then(response => response.json().then(data => ({ ok: response.ok, data: data })))
+            .then(function(result) {
+                if (!result.ok || result.data.status !== "ok") {
+                    alert("Verkauf fehlgeschlagen: " + (result.data.message || "Unbekannter Fehler"));
+                    btn.disabled = false;
+                    btn.innerText = "Verkaufen";
+                    return;
+                }
+                // Log-Tabelle und Info-Panel sofort aktualisieren - der
+                // Button verschwindet dabei automatisch, da das Symbol
+                // jetzt einen "sell" als letzte Aktion hat.
+                updateTradingLog();
+                updateInfoPanel();
+            })
+            .catch(function(error) {
+                console.error("Fehler beim manuellen Verkauf:", error);
+                alert("Verkauf fehlgeschlagen (Netzwerkfehler).");
+                btn.disabled = false;
+                btn.innerText = "Verkaufen";
+            });
+    }
+
     function updateTradingLog() {
         fetch("{% url 'logs_api' config.id %}")
             .then(response => response.json())
             .then(data => {
                 var tbody = document.getElementById('trading-log-body');
                 var pairColors = computeTradePairColors(data);
+                var openBuyIndices = computeOpenBuyIndices(data);
+                var configId = {{ config.id }};
                 var rows = "";
                 data.forEach(function(log, idx) {
                     var borderStyle = pairColors[idx] ? ("border-left:5px solid " + pairColors[idx] + ";") : "";
+                    var actionCell = "";
+                    if (openBuyIndices[idx]) {
+                        actionCell = "<button type='button' class='btn btn-sm btn-warning' " +
+                            "onclick='manualSell(" + configId + ", \"" + escapeHtml(log.symbol) + "\", this)'>Verkaufen</button>";
+                    }
                     rows += "<tr style='" + borderStyle + "' class='" + (log.action === "buy" ? "table-success" : (log.action === "sell" ? "table-danger" : "")) + "'>" +
                         "<td>" + log.symbol + "</td>" +
                         "<td>" + log.date + "</td>" +
@@ -827,6 +891,7 @@ setInterval(pollBotStatus, 10000);
                         "<td>" + log.total_pl + "</td>" +
                         "<td>" + log.current_capital + "</td>" +
                         "<td>" + log.tank + "</td>" +
+                        "<td>" + actionCell + "</td>" +
                         "</tr>";
                 });
                 tbody.innerHTML = rows;

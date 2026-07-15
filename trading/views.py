@@ -608,6 +608,7 @@ def logs_api(request, config_id):
     data = []
     for log in logs:
         data.append({
+            "id": log.id,
             "timestamp": log.timestamp.isoformat(),
             "date": log.timestamp.date().isoformat(),
             "time": log.timestamp.time().strftime("%H:%M:%S"),
@@ -624,6 +625,24 @@ def logs_api(request, config_id):
             "tank": float(log.tank) if log.tank is not None else 0,
         })
     return JsonResponse(data, safe=False)
+
+@login_required
+def manual_sell_view(request, config_id, symbol):
+    """Manueller Verkauf einer noch offenen Position (Button im Trading-
+    Logbuch bei einem Buy, dem noch kein Sell folgt). Verkauft ueber den
+    laufenden Bot zum letzten bekannten Kurs, genau wie ein automatischer
+    Sell durch die Trading-Logik.
+    """
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    try:
+        bot_manager.manual_sell(config.id, symbol)
+        return JsonResponse({"status": "ok"})
+    except ValueError as e:
+        return JsonResponse({"status": "error", "message": str(e)}, status=400)
+    except Exception as e:
+        logger.exception("Manueller Verkauf fuer Konfiguration %s (%s) fehlgeschlagen: %s", config.id, symbol, e)
+        ErrorLog.objects.create(configuration=config, source="views.manual_sell_view", message=str(e)[:4000])
+        return JsonResponse({"status": "error", "message": "Verkauf fehlgeschlagen. Siehe Fehler-Log."}, status=500)
 
 @login_required
 def generate_report(request, config_id):
