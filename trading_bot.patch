@@ -1,0 +1,127 @@
+--- a/trading/trading_bot.py
++++ b/trading/trading_bot.py
+@@ -2,11 +2,13 @@
+ import asyncio
+ import threading
+ import logging
++import random
+ import time
+ from decimal import Decimal, ROUND_HALF_UP
+ 
+ from asgiref.sync import sync_to_async
+-from django.db import IntegrityError, transaction
++from django.db import IntegrityError, transaction, close_old_connections, connection, OperationalError
++from django.db.utils import InterfaceError
+ 
+ from .models import Configuration, DataLog, TradingLog, ErrorLog
+ 
+@@ -14,15 +16,74 @@
+ 
+ 
+ # =========================================================
++# DB-RECONNECT-DECORATOR
++# =========================================================
++#
++# ROOT CAUSE des "connection already closed"-Bugs:
++# main_loop laeuft dauerhaft in seinem eigenen Thread/Event-Loop, komplett
++# ausserhalb jedes Django-Request-Zyklus. Django schliesst/erneuert DB-
++# Connections aber normalerweise nur ueber die Signals
++# request_started/request_finished (gesteuert von CONN_MAX_AGE) - die
++# feuern hier nie. Die db_*-Funktionen unten laufen zudem via
++# sync_to_async(thread_sensitive=False) im gemeinsamen Default-
++# ThreadPoolExecutor, dessen Threads Django thread-lokal cachet und die
++# ueber viele Sleep-Zyklen (config.time_interval) hinweg wiederverwendet
++# werden. Sobald Postgres/Render (Free Tier!) eine idle gewordene
++# Connection serverseitig kappt, crasht die naechste Query mit
++# InterfaceError/OperationalError - genau das Muster aus dem Log.
++#
++# Fix: vor jeder Query close_old_connections() aufrufen (ersetzt den hier
++# fehlenden Request-Signal-Trigger) und bei einem tatsaechlichen
++# Connection-Fehler die kaputte Connection hart schliessen + mit
++# Exponential Backoff + Jitter neu verbinden, statt den Bot abstuerzen
++# zu lassen.
++def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress_after_retries=False):
++    def decorator(func):
++        def wrapper(*args, **kwargs):
++            attempt = 0
++            while True:
++                try:
++                    close_old_connections()
++                    return func(*args, **kwargs)
++                except (InterfaceError, OperationalError) as exc:
++                    attempt += 1
++                    try:
++                        connection.close()
++                    except Exception:
++                        pass
++
++                    if attempt > max_retries:
++                        logger.error(
++                            "DB-Reconnect fehlgeschlagen nach %s Versuchen in %s: %s",
++                            attempt, func.__name__, exc,
++                        )
++                        if suppress_after_retries:
++                            return None
++                        raise
++
++                    delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
++                    delay += random.uniform(0, delay * 0.25)  # Jitter
++                    logger.warning(
++                        "DB-Connection verloren in %s (Versuch %s/%s): %s -> Reconnect in %.2fs",
++                        func.__name__, attempt, max_retries, exc, delay,
++                    )
++                    time.sleep(delay)  # laeuft im Executor-Thread, blockiert die Event-Loop NICHT
++        return wrapper
++    return decorator
++
++
++# =========================================================
+ # DB-HILFSFUNKTIONEN (ASYNC-SAFE)
+ # =========================================================
+ 
+ @sync_to_async(thread_sensitive=False)
++@db_safe()
+ def db_get_config(config_id):
+     return Configuration.objects.get(id=config_id)
+ 
+ 
+ @sync_to_async(thread_sensitive=False)
++@db_safe(suppress_after_retries=True)
+ def db_create_datalog_safe(**kwargs):
+     try:
+         with transaction.atomic():
+@@ -33,6 +94,7 @@
+ 
+ 
+ @sync_to_async(thread_sensitive=False)
++@db_safe(suppress_after_retries=True)
+ def db_create_tradinglog_safe(**kwargs):
+     try:
+         with transaction.atomic():
+@@ -42,15 +104,25 @@
+ 
+ 
+ @sync_to_async(thread_sensitive=False)
++@db_safe(suppress_after_retries=True)
+ def db_log_error(config_id, source, message):
+     try:
+         ErrorLog.objects.create(configuration_id=config_id, source=source, message=str(message)[:4000])
++    except (InterfaceError, OperationalError):
++        # WICHTIG: diese beiden NICHT hier verschlucken, sondern an
++        # db_safe() durchreichen, damit Reconnect+Retry tatsaechlich
++        # greift. Vorher fing das breite "except Exception" hier alles ab
++        # und maskierte genau den Connection-Fehler, den es eigentlich
++        # loggen sollte.
++        raise
+     except Exception:
+-        # Fehler-Logging darf selbst niemals den Bot zum Absturz bringen
++        # Alle anderen Fehler bleiben unkritisch: Fehler-Logging darf
++        # selbst niemals den Bot zum Absturz bringen.
+         pass
+ 
+ 
+ @sync_to_async(thread_sensitive=False)
++@db_safe()
+ def db_get_recent_deltadelta(symbol, config_id, limit=10):
+     return list(
+         DataLog.objects.filter(
