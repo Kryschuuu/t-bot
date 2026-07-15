@@ -1,0 +1,28 @@
+--- a/trading_bot_project/settings.py
++++ b/trading_bot_project/settings.py
+@@ -188,7 +188,24 @@
+     DATABASES = {
+         "default": dj_database_url.parse(
+             DATABASE_URL,
+-            conn_max_age=600,
++            # BUGFIX ("connection already closed" / psycopg2.InterfaceError,
++            # siehe trading/trading_bot.py db_safe()): Render Postgres Free
++            # Tier kappt idle gewordene Connections serverseitig deutlich
++            # frueher als die alten 600s. Django hat das bis dato nicht
++            # bemerkt (kein CONN_HEALTH_CHECKS) und eine bereits tote
++            # Connection einfach weiterverwendet -> InterfaceError bei der
++            # naechsten Query. conn_max_age auf 60s gesenkt (kuerzeres
++            # "Verfallsdatum" pro Connection) UND conn_health_checks=True
++            # aktiviert: Django pingt eine wiederverwendete Connection kurz
++            # (SELECT 1), bevor sie fuer eine Query genutzt wird, und
++            # verwirft+erneuert sie automatisch, falls der Ping fehlschlaegt.
++            # Das greift ueberall dort, wo Django selbst den Request-Zyklus
++            # steuert (Views, Admin, Channels-Consumer). Fuer den dauerhaft
++            # laufenden TradingBot-Thread (kein Request-Zyklus, daher feuert
++            # der Health-Check-Trigger dort nie) sorgt zusaetzlich der
++            # eigene db_safe()-Reconnect-Decorator in trading_bot.py.
++            conn_max_age=60,
++            conn_health_checks=True,
+             ssl_require=env_bool("DATABASE_SSL_REQUIRE", True),
+         )
+     }
