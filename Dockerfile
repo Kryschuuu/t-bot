@@ -22,7 +22,7 @@ RUN groupadd --system app && useradd --system --gid app --home /app app
 COPY --chown=app:app . .
 # WORKDIR legt /app als root an. Der unprivilegierte Runtime-Benutzer muss
 # STATIC_ROOT (und ggf. lokale Cache-Verzeichnisse) darin anlegen dürfen.
-RUN chown app:app /app
+RUN chmod +x /app/docker-entrypoint.sh && chown app:app /app
 USER app
 
 RUN SECRET_KEY=build-only-secret-key \
@@ -31,4 +31,4 @@ RUN SECRET_KEY=build-only-secret-key \
     python manage.py collectstatic --noinput
 
 EXPOSE 8000
-CMD ["sh", "-c", "python manage.py migrate --noinput && exec daphne -b 0.0.0.0 -p ${PORT} trading_bot_project.asgi:application"]
+CMD ["/app/docker-entrypoint.sh"]

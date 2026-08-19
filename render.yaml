@@ -9,8 +9,8 @@ services:
     region: frankfurt
     branch: arena/01a01bc6-t-bot
     dockerfilePath: ./Dockerfile
-    dockerCommand: >-
-      /bin/sh -c 'python manage.py migrate --noinput && exec daphne -b 0.0.0.0 -p $PORT trading_bot_project.asgi:application'
+    # Kein dockerCommand-Override: Render verwendet den exec-form CMD aus dem
+    # Dockerfile. Dadurch gibt es keine zweite Shell-/Quote-Ebene.
     healthCheckPath: /health/
     autoDeployTrigger: commit
     envVars:
