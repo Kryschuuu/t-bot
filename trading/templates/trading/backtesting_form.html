@@ -1,446 +1,119 @@
 {% extends "trading/base.html" %}
-{% load static %}
-{% load my_filters %}
+{% block title %}Backtesting · {{ config.name }}{% endblock %}
 {% block content %}
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <title>Backtesting</title>
-    <link rel="stylesheet" href="{% static 'css/bootstrap.min.css' %}">
-</head>
-<body>
-<div class="container mt-4">
-    <h1 class="mb-4">Backtesting für Konfiguration {{ config.id }}</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h2">Backtesting · {{ config.name }}</h1>
+    <a href="{% url 'dashboard' %}?config_id={{ config.id }}" class="btn btn-outline-secondary">Zum Dashboard</a>
+</div>
 
-    {% if error %}
-        <div class="alert alert-danger">{{ error }}</div>
-    {% endif %}
-    <form method="post" class="mt-4">
-        {% csrf_token %}
-        <div class="mb-3">
-            <label>Presets:</label>
-            <div class="d-flex flex-wrap">
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 1, acc_to: 10, acc_steps: 1, nda_from: -1, nda_to: 1, nda_steps: 0.1, deltadelta_from: -1, deltadelta_to: 1, deltadelta_steps: 0.1})">Preset 1</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 0, acc_to: 5, acc_steps: 0.5, nda_from: -0.5, nda_to: 0.5, nda_steps: 0.05, deltadelta_from: -0.5, deltadelta_to: 0.5, deltadelta_steps: 0.05})">Preset 2</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 2, acc_to: 8, acc_steps: 2, nda_from: -0.8, nda_to: 0.8, nda_steps: 0.2, deltadelta_from: -0.8, deltadelta_to: 0.8, deltadelta_steps: 0.2})">Preset 3</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: -5, acc_to: 5, acc_steps: 1, nda_from: -0.2, nda_to: 0.2, nda_steps: 0.02, deltadelta_from: -0.2, deltadelta_to: 0.2, deltadelta_steps: 0.02})">Preset 4</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: -10, acc_to: 0, acc_steps: 2, nda_from: -0.9, nda_to: 0.1, nda_steps: 0.1, deltadelta_from: -0.9, deltadelta_to: 0.1, deltadelta_steps: 0.1})">Preset 5</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 5, acc_to: 15, acc_steps: 2.5, nda_from: -0.4, nda_to: 0.6, nda_steps: 0.1, deltadelta_from: -0.4, deltadelta_to: 0.6, deltadelta_steps: 0.1})">Preset 6</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: -2, acc_to: 2, acc_steps: 0.5, nda_from: -0.75, nda_to: 0.25, nda_steps: 0.05, deltadelta_from: -0.75, deltadelta_to: 0.25, deltadelta_steps: 0.05})">Preset 7</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 3, acc_to: 7, acc_steps: 1, nda_from: -0.1, nda_to: 0.9, nda_steps: 0.2, deltadelta_from: -0.1, deltadelta_to: 0.9, deltadelta_steps: 0.2})">Preset 8</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: -8, acc_to: -2, acc_steps: 1.5, nda_from: -0.6, nda_to: 0.4, nda_steps: 0.1, deltadelta_from: -0.6, deltadelta_to: 0.4, deltadelta_steps: 0.1})">Preset 9</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 0, acc_to: 1, acc_steps: 0.2, nda_from: -0.3, nda_to: 0.7, nda_steps: 0.2, deltadelta_from: -0.3, deltadelta_to: 0.7, deltadelta_steps: 0.2})">Preset 10</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="setPresets({acc_from: 1, acc_to: 10, acc_steps: 1, nda_from: -1, nda_to: 1, nda_steps: 0.1, deltadelta_from: -1, deltadelta_to: 1, deltadelta_steps: 0.1})">Standard</button>
-            </div>
-        </div>
-        <div class="mb-3">
-            <div class="form-check">
-                {{ form.schedule_backtest }}
-                <label class="form-check-label" for="{{ form.schedule_backtest.id_for_label }}">
-                    Backtest planen?
-                </label>
-            </div>
-        </div>
-        <div class="mb-3" id="schedule_time_picker" style="display: none;">
-            <label for="{{ form.scheduled_start_time.id_for_label }}" class="form-label">Geplante Startzeit:</label>
-            {{ form.scheduled_start_time }}
-            <div class="form-text">Bitte wählen Sie eine Startzeit in der Zukunft.</div>
-            {% if form.scheduled_start_time.errors %}
-                <div class="text-danger">{{ form.scheduled_start_time.errors|striptags }}</div>
-            {% endif %}
-        </div>
-        <div class="row">
-            <div class="col-12 col-md-4 mb-3">
-                <div class="card">
-                    <div class="card-header">Acceleration Schwellenwert</div>
-                    <div class="card-body">
-                        <div class="row mb-3">
-                            <label for="acc_from" class="col-sm-2 col-form-label">Von:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="acc_from" id="acc_from" class="form-control" placeholder="z.B. 0.0" required>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <label for="acc_to" class="col-sm-2 col-form-label">Bis:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="acc_to" id="acc_to" class="form-control" placeholder="z.B. 10.0" required>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <label for="acc_steps" class="col-sm-2 col-form-label">Schrittgröße:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="acc_steps" id="acc_steps" class="form-control" placeholder="z.B. 0.5" required>
-                            </div>
-                        </div>
-                    </div>
+<div class="card mb-4">
+    <div class="card-header">Neuen Backtest starten</div>
+    <div class="card-body">
+        <form method="post">
+            {% csrf_token %}
+            {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
+            <div class="row g-3">
+                {% for field in form %}
+                <div class="col-md-4 {% if field.name == 'schedule_backtest' or field.name == 'scheduled_start_time' %}schedule-field{% endif %}">
+                    <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    <div>{{ field }}</div>
+                    {% for error in field.errors %}<div class="text-danger small">{{ error }}</div>{% endfor %}
                 </div>
+                {% endfor %}
             </div>
+            <button class="btn btn-primary mt-3" type="submit">Backtest anlegen</button>
+        </form>
+    </div>
+</div>
 
-            <div class="col-12 col-md-4 mb-3">
-                <div class="card">
-                    <div class="card-header">NDA Schwellenwert</div>
-                    <div class="card-body">
-                        <div class="row mb-3">
-                            <label for="nda_from" class="col-sm-2 col-form-label">Von:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="nda_from" id="nda_from" class="form-control" placeholder="z.B. -1" required>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <label for="nda_to" class="col-sm-2 col-form-label">Bis:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="nda_to" id="nda_to" class="form-control" placeholder="z.B. 1" required>
-                            </div>
-                        </div>
-                        <div class="row mb-3">
-                            <label for="nda_steps" class="col-sm-2 col-form-label">Schrittgröße:</label>
-                            <div class="col-sm-10">
-                                <input type="text" name="nda_steps" id="nda_steps" class="form-control" placeholder="z.B. 0.001" required>
-                            </div>
-                        </div>
-                    </div>
+<div class="row g-3 mb-4">
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header">Laufende Backtests</div>
+            <div class="card-body">
+                {% for task in tasks_running %}
+                <div class="border rounded p-3 mb-3">
+                    <div class="d-flex justify-content-between"><strong>#{{ task.id }} · {{ task.get_status_display }}</strong><span>{{ task.symbol }}</span></div>
+                    <div class="progress my-2"><div id="progress-{{ task.id }}" class="progress-bar" style="width:{{ task.progress }}%">{{ task.progress }}%</div></div>
+                    <form method="post" action="{% url 'control_backtest' task.id %}" class="d-flex gap-2">
+                        {% csrf_token %}
+                        {% if task.status == 'paused' %}<button class="btn btn-sm btn-success" name="action" value="resume">Fortsetzen</button>{% else %}<button class="btn btn-sm btn-warning" name="action" value="pause">Pausieren</button>{% endif %}
+                        <button class="btn btn-sm btn-danger" name="action" value="cancel">Abbrechen</button>
+                    </form>
                 </div>
+                {% empty %}<p class="text-muted mb-0">Keine laufenden Backtests.</p>{% endfor %}
             </div>
         </div>
-
-        <div class="col-12 col-md-4 mb-3">
-            <div class="card">
-                <div class="card-header">Deltadelta Schwellenwert</div>
-                <div class="card-body">
-                    <div class="row mb-3">
-                        <label for="deltadelta_from" class="col-sm-2 col-form-label">Von:</label>
-                        <div class="col-sm-10">
-                            <input type="text" name="deltadelta_from" id="deltadelta_from" class="form-control" placeholder="z.B. -1" required>
-                        </div>
-                    </div>
-                    <div class="row mb-3">
-                        <label for="deltadelta_to" class="col-sm-2 col-form-label">Bis:</label>
-                        <div class="col-sm-10">
-                            <input type="text" name="deltadelta_to" id="deltadelta_to" class="form-control" placeholder="z.B. 1" required>
-                        </div>
-                    </div>
-                    <div class="row mb-3">
-                        <label for="deltadelta_steps" class="col-sm-2 col-form-label">Schrittgröße:</label>
-                        <div class="col-sm-10">
-                            <input type="text" name="deltadelta_steps" id="deltadelta_steps" class="form-control" placeholder="z.B. 0.001" required>
-                        </div>
-                    </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header">Geplante Backtests</div>
+            <div class="card-body">
+                {% for task in tasks_scheduled %}
+                <div class="border rounded p-3 mb-3">
+                    <strong>#{{ task.id }}</strong> · {{ task.scheduled_start_time }}<br><small>{{ task.symbol }}</small>
+                    <form method="post" action="{% url 'control_backtest' task.id %}" class="mt-2">{% csrf_token %}<button class="btn btn-sm btn-danger" name="action" value="cancel">Abbrechen</button></form>
                 </div>
+                {% empty %}<p class="text-muted mb-0">Keine geplanten Backtests.</p>{% endfor %}
             </div>
-        </div>
-        </div>
-        <center>
-        <button type="submit" class="btn btn-primary">Backtesting starten</button>
-        </center>
-    </form>
-
-    <div class="mt-4">
-        <ul class="nav nav-tabs" id="backtestTabs" role="tablist">
-            <li class="nav-item">
-                <a class="nav-link active" id="running-tab" data-bs-toggle="tab" href="#running" role="tab">Laufende Tests</a>
-            </li>
-             <li class="nav-item">
-                <a class="nav-link" id="scheduled-tab" data-bs-toggle="tab" href="#scheduled" role="tab">Geplante Tests</a>
-            </li>
-            {% for task in backtests %}
-                <li class="nav-item">
-                    <a class="nav-link" id="tab-{{ task.id }}" data-bs-toggle="tab" href="#result-{{ task.id }}" role="tab">
-                        Test #{{ task.id }} - Symbole: {{ task.symbol }}
-                        {% if task.status == 'completed' %}<span class="badge bg-success ms-2">Fertig</span>{% endif %}
-                    </a>
-                </li>
-            {% endfor %}
-        </ul>
-
-        <div class="tab-content" id="backtestTabsContent">
-            <div class="tab-pane fade show active" id="running" role="tabpanel">
-                {% if tasks_running %}
-                    {% for task in tasks_running %}
-                        <div class="card my-3 shadow-sm">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <span>Symbole: {{ task.symbol }} - {{ task.get_status_display }}</span>
-                                <div class="progress" style="width: 300px; height: 25px;">
-                                    <div id="progress-{{ task.id }}"
-                                         class="progress-bar progress-bar-striped {% if task.status == 'running' %}progress-bar-animated{% endif %}"
-                                         role="progressbar"
-                                         style="width: {{ task.progress }}%">
-                                        {{ task.progress }}%
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="card-body">
-                                <form method="post" action="{% url 'control_backtest' task.id %}" class="d-flex gap-2">
-                                    {% csrf_token %}
-                                    {% if task.status == 'running' %}
-                                        <button name="action" value="pause" class="btn btn-warning btn-sm">Pausieren</button>
-                                    {% elif task.status == 'paused' %}
-                                        <button name="action" value="resume" class="btn btn-success btn-sm">Fortsetzen</button>
-                                    {% endif %}
-                                    <button name="action" value="cancel" class="btn btn-danger btn-sm">Abbrechen</button>
-                                </form>
-                            </div>
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="alert alert-info mt-3">Keine aktiven Backtests</div>
-                {% endif %}
-            </div>
-
-            <div class="tab-pane fade" id="scheduled" role="tabpanel">
-                {% if tasks_scheduled %}
-                    {% for task in tasks_scheduled %}
-                        <div class="card my-3 shadow-sm">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <span>Symbole: {{ task.symbol }} - Geplant</span>
-                                <span>Geplant für: {{ task.scheduled_start_time|date:"d.m.Y H:i" }}</span>
-                            </div>
-                            <div class="card-body">
-                                <form method="post" action="{% url 'control_backtest' task.id %}" class="d-flex gap-2">
-                                    {% csrf_token %}
-                                    <button name="action" value="cancel" class="btn btn-danger btn-sm">Abbrechen</button>
-                                </form>
-                            </div>
-                        </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="alert alert-info mt-3">Keine geplanten Backtests</div>
-                {% endif %}
-            </div>
-
-
-            {% for task in backtests %}
-                <div class="tab-pane fade" id="result-{{ task.id }}" role="tabpanel" aria-labelledby="tab-{{ task.id }}">
-                    <div class="mt-4">
-                        {% if task.status == 'completed' and task.result %}
-                        <div class="row mb-3">
-                            <div class="col">
-                                <button type="button" class="btn btn-primary"
-                                        onclick="confirmGeneratePDF('{% url 'generate_backtest_pdf' task.id %}')">
-                                    <i class="bi bi-file-pdf me-2"></i> PDF-Report generieren
-                                </button>
-                                <p class="mt-2 text-info">Hinweis: Der Report enthält alle Details des abgeschlossenen Backtests.</p>
-                            </div>
-                        </div>
-                        <h2>Backtest Details</h2>
-                        <p><strong>Status:</strong> {{ task.get_status_display }}</p>
-                        <p><strong>Erstellt am:</strong> {{ task.created_at }}</p>
-                          <div class="card shadow-sm mb-4">
-                            <div class="card-header bg-success text-white">
-                                <h4 class="mb-0">Testparameter für Backtest #{{ task.id }} - Symbole: {{ task.symbol }}</h4>
-                            </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-md-12">
-                                        <h5>Beste Schwellenwerte (Gesamt für alle Symbole)</h5>
-                                        {% if task.result.optimized_thresholds_str_overall %}
-                                            <p>{{ task.result.optimized_thresholds_str_overall }}</p>
-                                        {% else %}
-                                            <p>Keine optimierten Schwellenwerte gefunden.</p>
-                                        {% endif %}
-                                    </div>
-                                    <div class="col-md-4">
-                                        <h5>Acceleration Bereich</h5>
-                                        <ul class="list-unstyled">
-                                            <li>Von: {{ task.parameters.acc_from|default:"N/A" }}</li>
-                                            <li>Bis: {{ task.parameters.acc_to|default:"N/A" }}</li>
-                                            <li>Schritt: {{ task.parameters.acc_steps|default:"N/A" }}</li>
-                                        </ul>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <h5>NDA Bereich</h5>
-                                        <ul class="list-unstyled">
-                                            <li>Von: {{ task.parameters.nda_from|default:"N/A" }}</li>
-                                            <li>Bis: {{ task.parameters.nda_to|default:"N/A" }}</li>
-                                            <li>Schritt: {{ task.parameters.nda_steps|default:"N/A" }}</li>
-                                        </ul>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <h5>Deltadelta Bereich</h5>
-                                        <ul class="list-unstyled">
-                                            <li>Von: {{ task.parameters.deltadelta_from|default:"N/A" }}</li>
-                                            <li>Bis: {{ task.parameters.deltadelta_to|default:"N/A" }}</li>
-                                            <li>Schritt: {{ task.parameters.deltadelta_steps|default:"N/A" }}</li>
-                                        </ul>
-                                    </div>
-                                </div>
-                            </div>
-                          </div>
-
-                          <div class="card shadow-sm mb-4">
-                            <div class="card-header bg-primary text-white">
-                              <h4 class="mb-0">Ergebnisse für Backtest #{{ task.id }} - Alle Symbole</h4>
-                            </div>
-                            <div class="card-body">
-                                {% if task.result.symbol_results %}
-                                    {% for symbol, result in task.result.symbol_results.items %}
-                                        <h4 class="mt-3">Symbol: {{ symbol }}</h4>
-                                        <div class="row mb-4">
-                                            <div class="col-md-12">
-                                                <h5>Beste Schwellenwerte (für Symbol: {{ symbol }})</h5>
-                                                {% if result.optimized_thresholds_str %}
-                                                    <p>{{ result.optimized_thresholds_str }}</p>
-                                                {% else %}
-                                                    <p>Keine optimierten Schwellenwerte gefunden.</p>
-                                                {% endif %}
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="card border-success">
-                                                    <div class="card-header bg-success text-white">Kapitalentwicklung für {{ symbol }}</div>
-                                                    <div class="card-body">
-                                                        <dl class="row">
-                                                            <dt class="col-6">Startkapital:</dt>
-                                                            <dd class="col-6 text-end">{{ config.start_capital|floatformat:2 }} USDT</dd>
-                                                            <dt class="col-6">Endkapital:</dt>
-                                                            <dd class="col-6 text-end">{{ result.best_capital|floatformat:2 }} USDT</dd>
-                                                            <dt class="col-6">Gesamtprofit:</dt>
-                                                            <dd class="col-6 text-end {% if result.best_capital > config.start_capital %}text-success{% else %}text-danger{% endif %}">
-                                                                {{ result.best_capital|sub:config.start_capital|floatformat:2 }} USDT
-                                                            </dd>
-                                                        </dl>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="card border-info">
-                                                    <div class="card-header bg-info text-white">Trade-Statistik für {{ symbol }}</div>
-                                                    <div class="card-body">
-                                                        <dl class="row">
-                                                            <dt class="col-6">Total Trades:</dt>
-                                                            <dd class="col-6 text-end">{{ result.report.num_trades }}</dd>
-                                                            <dt class="col-6">Profitabel:</dt>
-                                                            <dd class="col-6 text-end text-success">{{ result.report.profitable_trades }}</dd>
-                                                            <dt class="col-6">Verluste:</dt>
-                                                            <dd class="col-6 text-end text-danger">{{ result.report.unprofitable_trades }}</dd>
-                                                            <dt class="col-6">Win Rate:</dt>
-                                                            <dd class="col-6 text-end">
-                                                                {% widthratio result.report.profitable_trades result.report.num_trades 100 %}%
-                                                            </dd>
-                                                        </dl>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        <h4 class="mb-3">Trade-Historie für Symbol {{ symbol }}</h4>
-                                        <div class="table-responsive">
-                                            <table class="table table-striped table-hover align-middle">
-                                                <thead class="table-dark">
-                                                    <tr>
-                                                        <th>Typ</th>
-                                                        <th>Preis</th>
-                                                        <th>Zeitindex</th>
-                                                        <th>Kapital vorher</th>
-                                                        <th>Kapital nachher</th>
-                                                        <th>Profit</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {% for trade in result.report.trades %}
-                                                        <tr>
-                                                            <td>
-                                                                <span class="badge {% if trade.type == 'buy' %}bg-success{% else %}bg-danger{% endif %}">
-                                                                    {{ trade.type|upper }}
-                                                                </span>
-                                                            </td>
-                                                            <td>{{ trade.price|floatformat:8 }}</td>
-                                                            <td>{{ trade.index }}</td>
-                                                            <td>{{ trade.capital_before|floatformat:4 }}</td>
-                                                            <td>{{ trade.capital_after|floatformat:4 }}</td>
-                                                            <td class="{% if trade.profit_percentage >= 0 %}text-success{% else %}text-danger{% endif %}">
-                                                                {% if trade.type == 'sell' %}
-                                                                    {{ trade.profit_percentage|floatformat:4 }}%
-                                                                {% else %}
-                                                                    -
-                                                                {% endif %}
-                                                            </td>
-                                                        </tr>
-                                                    {% endfor %}
-                                                </tbody>
-                                            </table>
-                                        </div>
-
-                                        {% if plots|get_item:task.id|get_item:symbol %}
-                                            <h4 class="mt-5">Preisanalyse für Symbol {{ symbol }}</h4>
-                                            <div class="card">
-                                                <div class="card-body">
-                                                    <div style="width: 100%; height: 600px;"> {{ plots|get_item:task.id|get_item:symbol|safe }}</div>
-                                                </div>
-                                            </div>
-                                        {% endif %}
-                                    {% endfor %}
-                                {% else %}
-                                    <div class="alert alert-warning mt-3">Keine Symbolergebnisse verfügbar für Backtest #{{ task.id }}</div>
-                                {% endif %}
-                            </div>
-                          </div>
-                        {% else %}
-                          <div class="alert alert-warning mt-3">Noch keine Ergebnisse verfügbar oder Test nicht abgeschlossen für Backtest #{{ task.id }}</div>
-                        {% endif %}
-                    </div>
-                </div>
-            {% endfor %}
         </div>
     </div>
 </div>
 
-<script>
-    document.getElementById('id_schedule_backtest').addEventListener('change', function() {
-        var scheduleTimePicker = document.getElementById('schedule_time_picker');
-        if (this.checked) {
-            scheduleTimePicker.style.display = 'block';
-            document.getElementById('id_scheduled_start_time').required = true;
-        } else {
-            scheduleTimePicker.style.display = 'none';
-            document.getElementById('id_scheduled_start_time').required = false;
-        }
-    });
-</script>
+<h2 class="h4">Letzte Ergebnisse</h2>
+<div class="accordion" id="results">
+{% for task in backtests %}
+<div class="accordion-item">
+    <h3 class="accordion-header"><button class="accordion-button collapsed" data-bs-toggle="collapse" data-bs-target="#result-{{ task.id }}">#{{ task.id }} · {{ task.get_status_display }} · {{ task.completed_at }}</button></h3>
+    <div id="result-{{ task.id }}" class="accordion-collapse collapse" data-bs-parent="#results">
+        <div class="accordion-body">
+            {% if task.status == 'completed' and task.result.symbol_results %}
+            <a class="btn btn-sm btn-outline-primary mb-3" target="_blank" rel="noopener" href="{% url 'generate_backtest_pdf' task.id %}">PDF öffnen</a>
+            {% for symbol, result in task.result.symbol_results.items %}
+            <div class="card mb-3">
+                <div class="card-header"><strong>{{ symbol }}</strong></div>
+                <div class="card-body">
+                    <p>{{ result.optimized_thresholds_str }}</p>
+                    <div class="row">
+                        <div class="col-md-4"><strong>Endkapital:</strong> {{ result.best_capital }}</div>
+                        <div class="col-md-4"><strong>Verkäufe:</strong> {{ result.report.num_sells }}</div>
+                        <div class="col-md-4"><strong>Win Rate:</strong> {{ result.report.win_rate|floatformat:2 }} %</div>
+                    </div>
+                    <div class="table-responsive mt-3">
+                    <table class="table table-sm">
+                        <thead><tr><th>Typ</th><th>Index</th><th>Preis</th><th>Gebühr</th><th>Kapital danach</th><th>Profit</th></tr></thead>
+                        <tbody>{% for trade in result.report.trades %}<tr><td>{{ trade.type }}</td><td>{{ trade.index }}</td><td>{{ trade.price }}</td><td>{{ trade.fee }}</td><td>{{ trade.capital_after }}</td><td>{{ trade.profit_nominal|default:"–" }}</td></tr>{% endfor %}</tbody>
+                    </table>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="alert {% if task.status == 'failed' %}alert-danger{% else %}alert-secondary{% endif %}">{{ task.result.error|default:"Keine Ergebnisse verfügbar." }}</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% empty %}<p class="text-muted">Noch keine abgeschlossenen Backtests.</p>{% endfor %}
+</div>
+{% endblock %}
 
-
+{% block extra_js %}
 <script>
-    function setPresets(presets) {
-        document.getElementById('acc_from').value = presets.acc_from;
-        document.getElementById('acc_to').value = presets.acc_to;
-        document.getElementById('acc_steps').value = presets.acc_steps;
-        document.getElementById('nda_from').value = presets.nda_from;
-        document.getElementById('nda_to').value = presets.nda_to;
-        document.getElementById('nda_steps').value = presets.nda_steps;
-        document.getElementById('deltadelta_from').value = presets.deltadelta_from;
-        document.getElementById('deltadelta_to').value = presets.deltadelta_to;
-        document.getElementById('deltadelta_steps').value = presets.deltadelta_steps;
-    }
-</script>
-<script>
+(() => {
+    "use strict";
     {% for task in tasks_running %}
-    (function() {
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/backtest/{{ task.id }}/`);
-        ws.onmessage = function(event) {
+    (() => {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(`${protocol}//${location.host}/ws/backtest/{{ task.id }}/`);
+        socket.onmessage = event => {
             const data = JSON.parse(event.data);
-            const progressElement = document.querySelector(`#progress-{{ task.id }}`);
-            if(progressElement) {
-                progressElement.style.width = data.progress + '%';
-                progressElement.textContent = data.progress + '%';
-            }
+            const progress = document.getElementById("progress-{{ task.id }}");
+            if (progress) { progress.style.width = `${data.progress}%`; progress.textContent = `${data.progress}%`; }
+            if (data.progress >= 100) setTimeout(() => location.reload(), 500);
         };
     })();
     {% endfor %}
+})();
 </script>
-<script>
-    function confirmGeneratePDF(url) {
-        if (confirm("Möchten Sie den PDF-Report in einem neuen Tab öffnen?")) {
-            // Öffne PDF in neuem Tab
-            const newWindow = window.open(url, '_blank');
-            // Fokus auf das neue Fenster setzen
-            if (newWindow) {
-                newWindow.focus();
-            } else {
-                alert("Bitte erlauben Sie Popups für diese Seite");
-            }
-        }
-    }
-</script>
-</body>
-</html>
 {% endblock %}

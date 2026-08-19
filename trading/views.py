@@ -1,1166 +1,890 @@
-from decimal import Decimal, InvalidOperation
-from django.conf import settings
-from datetime import datetime, timedelta, date
-from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth import authenticate, login, logout
-from django.contrib.auth.forms import AuthenticationForm
-from django.contrib import messages
-from django.contrib.auth.decorators import login_required
-from django.http import JsonResponse, HttpResponse
-from django.template.loader import render_to_string
-from django.db.models import Sum, F, DecimalField, Max, Min
-from .forms import RegistrationForm, LoginForm, ConfigurationForm, DashboardConfigurationForm, BacktestForm
-from .models import Configuration, TradingLog, DataLog, BacktestTask, ErrorLog
-from .backtesting import Backtesting
-from .tasks import run_backtest, dispatch_task
-from channels.layers import get_channel_layer
-from celery.result import AsyncResult
-from celery import shared_task, Celery
-from celery.schedules import crontab
-from asgiref.sync import async_to_sync
-import plotly.express as px
-from .trading_bot import bot_manager
-import logging
-import numpy as np
-from weasyprint import HTML
-from collections import Counter
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-import io
 import asyncio
-from io import BytesIO
 import base64
+import logging
 import math
+import threading
+from collections import Counter, defaultdict
+from decimal import Decimal
+from io import BytesIO
 
-# Logging konfigurieren
+from asgiref.sync import async_to_sync
+from celery.result import AsyncResult
+from django.conf import settings
+from django.contrib import messages
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.decorators import login_required
+from django.db.models import Sum
+from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_GET, require_POST
+
+from .forms import (
+    BacktestForm,
+    ConfigurationForm,
+    DashboardConfigurationForm,
+    LoginForm,
+    RegistrationForm,
+)
+from .models import BacktestTask, Configuration, ErrorLog
+from .tasks import dispatch_task, local_task_is_active, run_backtest
+from .trading_bot import bot_manager
+
 logger = logging.getLogger(__name__)
+_PLOT_LOCK = threading.Lock()
+_MAX_API_ROWS = 5_000
+_MAX_LOG_ROWS = 2_000
+_MAX_TOTAL_BACKTEST_COMBINATIONS = 20_000
 
 
-def home(request):    
-    return redirect('login')
+def _safe_next_url(request, candidate):
+    if candidate and url_has_allowed_host_and_scheme(
+        candidate,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return candidate
+    return None
+
+
+def _redirect_dashboard(config_id):
+    return redirect(f"{reverse('dashboard')}?config_id={config_id}")
+
+
+def _latest_rows(queryset, limit):
+    rows = list(queryset.order_by("-timestamp", "-id")[:limit])
+    rows.reverse()
+    return rows
+
+
+def _symbols(config):
+    return [symbol.strip() for symbol in config.symbols.split(",") if symbol.strip()]
+
+
+def _realized_profit(config):
+    return config.logs.filter(action="sell").aggregate(total=Sum("pl_nominal"))["total"] or Decimal(
+        0
+    )
+
+
+def _portfolio_series(config, logs, opening_profit=Decimal(0)):
+    capital = config.start_capital + opening_profit
+    equity = []
+    for log in logs:
+        if log.action == "sell":
+            capital += log.pl_nominal
+        equity.append({"t": log.timestamp.isoformat(), "v": float(capital)})
+    return capital, equity
+
+
+def calculate_performance_metrics(logs):
+    sell_profits = [float(log.pl_nominal) for log in logs if log.action == "sell"]
+    wins = [profit for profit in sell_profits if profit > 0]
+    losses = [profit for profit in sell_profits if profit <= 0]
+    average_win = sum(wins) / len(wins) if wins else 0
+    average_loss = sum(losses) / len(losses) if losses else 0
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    return {
+        "win_rate": round(len(wins) / len(sell_profits) * 100, 2) if sell_profits else 0,
+        "avg_profit": round(sum(sell_profits) / len(sell_profits), 4) if sell_profits else 0,
+        "total_wins": len(wins),
+        "total_losses": len(losses),
+        "avg_win": round(average_win, 4),
+        "avg_loss": round(average_loss, 4),
+        "risk_reward": round(average_win / abs(average_loss), 2) if average_loss else 0,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else 0,
+        "max_win": round(max(sell_profits), 4) if sell_profits else 0,
+        "max_loss": round(min(sell_profits), 4) if sell_profits else 0,
+    }
+
+
+@require_GET
+def health_view(request):
+    return JsonResponse({"status": "ok"})
+
+
+def home(request):
+    return redirect("dashboard" if request.user.is_authenticated else "login")
 
 
 def passphrase_gate_view(request):
-    """Landingpage mit Disclaimer + Passphrase-Eingabe (siehe PassphraseGateMiddleware).
-
-    Nach erfolgreicher Eingabe wird ein Session-Flag gesetzt, sodass die
-    Passphrase pro Browser-Session nur einmal eingegeben werden muss.
-    """
-    # Bereits verifiziert -> direkt zur eigentlich gewuenschten Seite (oder Login)
+    requested_next = request.POST.get("next") or request.GET.get("next")
+    next_url = _safe_next_url(request, requested_next)
     if request.session.get("passphrase_verified"):
-        return redirect(request.GET.get("next") or "login")
+        return redirect(next_url or "login")
 
     error = None
-    next_url = request.POST.get("next") or request.GET.get("next") or ""
-
     if request.method == "POST":
-        submitted = request.POST.get("passphrase", "")
-        import secrets as _secrets
-        if _secrets.compare_digest(submitted.strip(), str(settings.PASSPHRASE)):
+        import secrets
+
+        submitted = request.POST.get("passphrase", "").strip()
+        if secrets.compare_digest(submitted, str(settings.PASSPHRASE)):
+            request.session.cycle_key()
             request.session["passphrase_verified"] = True
             return redirect(next_url or "login")
-        else:
-            error = "Falsche Passphrase. Zugang verweigert."
-
-    return render(request, "trading/passphrase_gate.html", {"error": error, "next": next_url})
+        error = "Falsche Passphrase. Zugang verweigert."
+    return render(
+        request,
+        "trading/passphrase_gate.html",
+        {"error": error, "next": next_url or ""},
+    )
 
 
 def register_view(request):
-    if request.method == 'POST':
-        form = RegistrationForm(request.POST)
-        if form.is_valid():
-            try:
-                user = form.save(commit=False)
-                user.set_password(form.cleaned_data['password'])
-                user.save()
-                logger.debug("User registered: %s", user.username)
-                return redirect('login')
-            except Exception as e:
-                logger.error("Registrierungsfehler: %s", e)
-    else:
-        form = RegistrationForm()
-    return render(request, 'trading/register.html', {'form': form})
+    form = RegistrationForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        user = form.save()
+        logger.info("Benutzer %s wurde registriert", user.username)
+        messages.success(request, "Registrierung erfolgreich. Bitte jetzt anmelden.")
+        return redirect("login")
+    return render(request, "trading/register.html", {"form": form})
+
 
 def login_view(request):
-    if request.method == 'POST':
-        form = LoginForm(request.POST)
-        if form.is_valid():
-            try:
-                username = form.cleaned_data['username']
-                password = form.cleaned_data['password']
-                user = authenticate(request, username=username, password=password)
-                if user:
-                    login(request, user)
-                    logger.debug("User logged in: %s", user.username)
-                    return redirect('dashboard')
-                else:
-                    logger.warning("Login fehlgeschlagen für: %s", username)
-            except Exception as e:
-                logger.error("Login-Fehler: %s", e)
-    else:
-        form = LoginForm()
-    return render(request, 'trading/login.html', {'form': form})
+    form = LoginForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        user = authenticate(
+            request,
+            username=form.cleaned_data["username"],
+            password=form.cleaned_data["password"],
+        )
+        if user is not None:
+            login(request, user)
+            next_url = _safe_next_url(
+                request,
+                request.POST.get("next") or request.GET.get("next"),
+            )
+            return redirect(next_url or "dashboard")
+        form.add_error(None, "Benutzername oder Passwort ist falsch.")
+    return render(request, "trading/login.html", {"form": form})
 
+
+@login_required
+@require_POST
 def logout_view(request):
     logout(request)
-    return redirect('login')
+    return redirect("login")
+
 
 @login_required
 def config_view(request):
-    """
-    Neue Konfiguration erstellen
-    """
-    try:
-        if request.method == 'POST':
-            form = ConfigurationForm(request.POST)
-            if form.is_valid():
-                config = form.save(commit=False)
-                config.user = request.user
-                if config.start_capital <= config.trade_amount:
-                    form.add_error('trade_amount', "Trade amount muss kleiner als Startkapital sein.")
-                    return render(request, 'trading/config_form.html', {'form': form})
-                config.save()
-                logger.debug("Configuration created: %s", config.id)
-                return redirect('config_list')
-        else:
-            form = ConfigurationForm()
-    except Exception as e:
-        logger.error("Konfigurationsfehler: %s", e)
-        form = ConfigurationForm()
-    return render(request, 'trading/config_form.html', {'form': form})
+    form = ConfigurationForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        config = form.save(commit=False)
+        config.user = request.user
+        config.save()
+        messages.success(request, "Konfiguration wurde erstellt.")
+        return redirect("config_list")
+    return render(request, "trading/config_form.html", {"form": form})
+
 
 @login_required
 def config_list_view(request):
-    """
-    Liste aller Konfigurationen des Users; von hier aus können Konfigurationen geladen, bearbeitet,
-    aktiviert, deaktiviert oder gelöscht werden.
-    """
-    try:
-        configs = Configuration.objects.filter(user=request.user)
-        return render(request, 'trading/config_list.html', {'configs': configs})
-    except Exception as e:
-        logger.error("Fehler beim Laden der Konfigurationen: %s", e)
-        return render(request, 'trading/config_list.html', {'configs': []})
+    configs = Configuration.objects.filter(user=request.user).order_by("-id")
+    return render(request, "trading/config_list.html", {"configs": configs})
+
 
 @login_required
 def config_edit_view(request, config_id):
-    # Hole die Konfiguration, die dem eingeloggten User gehört
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    if request.method == 'POST':
-        # Das Formular mit den POST-Daten und der bestehenden Instanz initialisieren
-        form = ConfigurationForm(request.POST, instance=config)
-        if form.is_valid():
-            form.save()  # Aktualisiert die Konfiguration in der Datenbank
-            return redirect('config_list')  # Weiterleitung zur Übersicht der Konfigurationen
-    else:
-        # Formular mit den bestehenden Daten initialisieren
-        form = ConfigurationForm(instance=config)
-    return render(request, 'trading/config_edit.html', {'form': form, 'config': config})
-    
+    form = ConfigurationForm(request.POST or None, instance=config)
+    if request.method == "POST" and form.is_valid():
+        was_running = config.is_running
+        config = form.save()
+        if was_running:
+            bot_manager.restart_bot(config)
+        messages.success(request, "Konfiguration wurde aktualisiert.")
+        return redirect("config_list")
+    return render(
+        request,
+        "trading/config_edit.html",
+        {"form": form, "config": config},
+    )
+
+
 @login_required
+@require_POST
 def config_activate(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    try:
+        bot_manager.start_bot(config)
+    except Exception as exc:
+        logger.exception("Bot-Start für Konfiguration %s fehlgeschlagen", config.id)
+        ErrorLog.objects.create(
+            configuration=config,
+            source="views.config_activate",
+            message=str(exc)[:4000],
+        )
+        messages.error(request, f"Bot konnte nicht gestartet werden: {exc}")
+    else:
+        if not config.is_running:
+            config.is_running = True
+            config.save(update_fields=["is_running"])
+        messages.success(request, "Bot wurde aktiviert.")
+    return redirect("config_list")
 
-    # Bot nur starten, wenn er NICHT bereits laeuft (im echten, gemeinsamen
-    # bot_manager-Singleton aus trading_bot.py - siehe Fehler "Bot: STOPPED"
-    # im Debugging-Protokoll: es gab hier frueher ein zweites, komplett
-    # unabhaengiges Status-Dict (trading/bot_manager.py), das nie aktualisiert
-    # wurde. Das ist jetzt entfernt - Configuration.is_running (DB) und
-    # bot_manager.is_running() (echter Thread) sind die einzigen beiden
-    # Quellen der Wahrheit, und bot_status_api liest jetzt aus genau diesen.
-    if not bot_manager.is_running(config.id):
-        try:
-            bot_manager.start_bot(config)
-        except Exception as e:
-            logger.exception("Bot-Start fuer Konfiguration %s fehlgeschlagen: %s", config.id, e)
-            ErrorLog.objects.create(configuration=config, source="views.config_activate", message=str(e)[:4000])
-            messages.error(
-                request,
-                f"Bot konnte nicht gestartet werden: {e}. "
-                f"Bitte Exchange/Symbole in der Konfiguration pruefen."
-            )
-            return redirect('config_list')
 
-    if not config.is_running:
-        config.is_running = True
-        config.save(update_fields=["is_running"])
-
-    return redirect('config_list')
-
-    
 @login_required
+@require_POST
 def config_deactivate(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-
-    if bot_manager.is_running(config.id):
-        bot_manager.stop_bot(config)
-
+    bot_manager.stop_bot(config)
     if config.is_running:
         config.is_running = False
         config.save(update_fields=["is_running"])
-
-    return redirect('config_list')
+    messages.success(request, "Bot wurde deaktiviert.")
+    return redirect("config_list")
 
 
 @login_required
 def config_delete(request, config_id):
-    """
-    Löscht eine Konfiguration und alle zugehörigen Daten, nachdem der Benutzer dies bestätigt hat.
-    """
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    if request.method == 'POST':
+    if request.method == "POST":
+        bot_manager.stop_bot(config)
         config.delete()
-        logger.debug("Configuration deleted: %s", config.id)
-        return redirect('config_list')
-    return render(request, 'trading/config_confirm_delete.html', {'config': config})
+        messages.success(request, "Konfiguration wurde gelöscht.")
+        return redirect("config_list")
+    return render(
+        request,
+        "trading/config_confirm_delete.html",
+        {"config": config},
+    )
 
-
-def calculate_performance_metrics(logs):
-    """Berechnet detaillierte Performance-Metriken aus einer Liste von TradingLogs."""
-    # Nur abgeschlossene Trades (Sells) für die Gewinnberechnung heranziehen
-    sell_logs = [log for log in logs if log.action == 'sell']
-
-    if not sell_logs:
-        return {
-            'win_rate': 0, 'avg_profit': 0, 'total_wins': 0, 'total_losses': 0,
-            'risk_reward': 0, 'profit_factor': 0, 'max_win': 0, 'max_loss': 0,
-            'avg_win': 0, 'avg_loss': 0
-        }
-
-    profits = [float(log.pl_nominal) for log in sell_logs]
-    wins = [p for p in profits if p > 0]
-    losses = [p for p in profits if p <= 0]
-
-    total_wins = len(wins)
-    total_losses = len(losses)
-    win_rate = (total_wins / len(profits) * 100) if profits else 0
-
-    avg_win = (sum(wins) / total_wins) if wins else 0
-    avg_loss = (sum(losses) / total_losses) if losses else 0
-
-    # Profit Faktor: Bruttogewinn / Bruttoverlust
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
-    profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else (gross_profit if gross_profit > 0 else 0)
-
-    # Risk/Reward Ratio (basierend auf Durchschnittswerten)
-    rrr = (abs(avg_win / avg_loss)) if avg_loss != 0 else 0
-
-    return {
-        'win_rate': round(win_rate, 2),
-        'avg_profit': round(sum(profits) / len(profits), 4) if profits else 0,
-        'total_wins': total_wins,
-        'total_losses': total_losses,
-        'avg_win': round(avg_win, 4),
-        'avg_loss': round(avg_loss, 4),
-        'risk_reward': round(rrr, 2),
-        'profit_factor': round(profit_factor, 2),
-        'max_win': round(max(profits), 4) if profits else 0,
-        'max_loss': round(min(profits), 4) if profits else 0,
-    }
-
-
-@login_required
-def dashboard_info(request, config_id):
-    config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    logs = TradingLog.objects.filter(configuration=config).order_by('timestamp')
-
-    # Performance Metriken berechnen
-    metrics = calculate_performance_metrics(logs)
-
-    # Equity Curve Daten
-    equity_curve = [float(config.start_capital)]
-    current_equity = float(config.start_capital)
-    equity_timestamps = [timezone.now().strftime("%H:%M:%S")] # Fallback Startzeit
-
-    for log in logs:
-        current_equity += float(log.pl_nominal or 0)
-        equity_curve.append(current_equity)
-        equity_timestamps.append(log.timestamp.strftime("%H:%M:%S"))
-
-    # Letzte Logs für die Tabelle
-    recent_logs_list = []
-    for log in logs.order_by('-timestamp')[:10]:
-        recent_logs_list.append({
-            'timestamp': log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            'symbol': log.symbol,
-            'action': log.action,
-            'price': str(log.price),
-            'amount': str(log.amount),
-            'pl_nominal': str(log.pl_nominal) if log.pl_nominal else "0.00"
-        })
-
-    data = {
-        'recent_logs': recent_logs_list,
-        'equity_curve': equity_curve,
-        'equity_timestamps': equity_timestamps,
-        'metrics': metrics,  # Metriken zum JSON hinzufügen
-        'current_capital': str(round(current_equity, 2)),
-    }
-    return JsonResponse(data)
 
 @login_required
 def dashboard_view(request):
-    """
-    Zeigt das Dashboard an. Der Benutzer kann über einen GET-Parameter config_id zwischen
-    verschiedenen Konfigurationen wechseln. Zusätzlich wird geprüft, ob die Konfiguration
-    als aktiv (is_running=True) markiert ist – wenn ja, wird der Bot gestartet.
-    """
-    config_id = request.GET.get('config_id')
+    config_id = request.GET.get("config_id")
     if config_id:
         config = get_object_or_404(Configuration, id=config_id, user=request.user)
     else:
-        config = Configuration.objects.filter(user=request.user).order_by('-id').first()
+        config = Configuration.objects.filter(user=request.user).order_by("-id").first()
 
-    
-    if request.method == 'POST':
-        form = DashboardConfigurationForm(request.POST, instance=config)  # Verwende das neue Formular
-        if form.is_valid():
-            form.save()
-            logger.debug("Dashboard Configuration updated from dashboard: %s", config.id)
-            return redirect('dashboard')  # Refresh the dashboard
-        else:
-            logger.warning("Dashboard Configuration update from dashboard failed: %s", form.errors)
-    else:
-        form = DashboardConfigurationForm(instance=config)  # Verwende das neue Formular
+    if not config:
+        return render(
+            request,
+            "trading/dashboard.html",
+            {"config": None, "all_configs": []},
+        )
 
-    context = {'config': config, 'form': form}
-    
-    if config:
-        logs = config.logs.all()
-        total_pl = sum((log.pl_nominal for log in logs), Decimal('0.0'))
-        # Anzahl der profitablen und unprofitablen Verkäufe zählen
-        profitable_sells = logs.filter(action='sell', pl_nominal__gt=0).count()
-        unprofitable_sells = logs.filter(action='sell', pl_nominal__lt=0).count()
-        context.update({
-            'logs': logs,
-            'current_capital': config.start_capital + total_pl,
-            'tank': total_pl,
-            'buy_orders': logs.filter(action='buy').count(),
-            'sell_orders': logs.filter(action='sell').count(),
-            'profitable_sells': profitable_sells,
-            'unprofitable_sells': unprofitable_sells,
-            'symbols': [s.strip() for s in config.symbols.split(',')],
-            'data_logs': {
-                symbol: config.data_logs.filter(symbol=symbol).order_by('timestamp')
-                for symbol in config.symbols.split(',')
-            },
-            # Zusätzlich alle Konfigurationen des Benutzers zur Navigation
-            'all_configs': Configuration.objects.filter(user=request.user)
-        })
-    else:
-        context.update({
-            'current_capital': Decimal('0.0'),
-            'tank': Decimal('0.0'),
-            'buy_orders': 0,
-            'sell_orders': 0,
-            'symbols': [],
-            'data_logs': {},
-            'all_configs': []
-        })
-    return render(request, 'trading/dashboard.html', context)
+    form = DashboardConfigurationForm(request.POST or None, instance=config)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Strategieparameter wurden gespeichert.")
+        return _redirect_dashboard(config.id)
+
+    logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    total_profit = _realized_profit(config)
+    current_capital = config.start_capital + total_profit
+    context = {
+        "config": config,
+        "form": form,
+        "logs": logs[-500:],
+        "current_capital": current_capital,
+        "tank": total_profit,
+        "buy_orders": sum(log.action == "buy" for log in logs),
+        "sell_orders": sum(log.action == "sell" for log in logs),
+        "profitable_sells": sum(log.action == "sell" and log.pl_nominal > 0 for log in logs),
+        "unprofitable_sells": sum(log.action == "sell" and log.pl_nominal <= 0 for log in logs),
+        "symbols": _symbols(config),
+        "all_configs": Configuration.objects.filter(user=request.user).order_by("-id"),
+    }
+    return render(request, "trading/dashboard.html", context)
+
 
 @login_required
+@require_POST
 def reset_log(request, config_id):
-    try:
-        config = get_object_or_404(Configuration, id=config_id, user=request.user)
-        config.logs.all().delete()
-        logger.debug("Trading-Logbuch zurückgesetzt für Konfig: %s", config.id)
-    except Exception as e:
-        logger.error("Fehler beim Zurücksetzen des Logbuchs: %s", e)
-    return redirect('dashboard')
-
-
-@login_required
-def data_logs_api(request):
-    config_id = request.GET.get('config_id')
-    symbol = request.GET.get('symbol')
-    try:
-        config = Configuration.objects.get(id=config_id, user=request.user)
-    except Configuration.DoesNotExist:
-        return JsonResponse({"error": "Configuration not found"}, status=404)
-    
-    data_logs = config.data_logs.filter(symbol=symbol).order_by('timestamp')
-    data = []
-    for dl in data_logs:
-        data.append({
-            "timestamp": dl.timestamp.isoformat(),
-            "price": dl.price,
-            "deltadelta": dl.deltadelta if dl.deltadelta is not None else 0,
-            "div_DVA_prev_NDA": dl.div_DVA_prev_NDA if dl.div_DVA_prev_NDA is not None else 0,
-            "nda": dl.nda if dl.nda is not None else 0,
-        })
-    return JsonResponse(data, safe=False)
-
-@login_required
-def trades_api(request):
-    config_id = request.GET.get('config_id')
-    symbol = request.GET.get('symbol')
-    try:
-        config = Configuration.objects.get(id=config_id, user=request.user)
-    except Configuration.DoesNotExist:
-        return JsonResponse({"error": "Configuration not found"}, status=404)
-    
-    trades = TradingLog.objects.filter(configuration=config, symbol=symbol).order_by('timestamp')
-    data = []
-    for trade in trades:
-        data.append({
-            "timestamp": trade.timestamp.isoformat(),
-            "action": trade.action,
-            "price": float(trade.price),
-        })
-    return JsonResponse(data, safe=False)
-
-@login_required
-def info_api(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    logs = (
-        TradingLog.objects
-        .filter(configuration_id=config_id)
-        .order_by("timestamp")
+    if config.is_running:
+        bot_manager.restart_bot(config, before_start=lambda: config.logs.all().delete())
+        messages.success(
+            request,
+            "Der Bot wird sauber neu gestartet; dabei werden Trading-Log und Portfolio zurückgesetzt.",
+        )
+    else:
+        config.logs.all().delete()
+        messages.success(request, "Trading-Log und simuliertes Portfolio wurden zurückgesetzt.")
+    return _redirect_dashboard(config.id)
+
+
+def _validated_start_time(request):
+    raw = request.GET.get("start_time")
+    if not raw:
+        return None
+    parsed = parse_datetime(raw)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+@login_required
+@require_GET
+def data_logs_api(request):
+    config = get_object_or_404(
+        Configuration,
+        id=request.GET.get("config_id"),
+        user=request.user,
+    )
+    symbol = request.GET.get("symbol", "").strip()
+    if symbol not in _symbols(config):
+        return JsonResponse({"error": "Ungültiges Symbol"}, status=400)
+    queryset = config.data_logs.filter(symbol=symbol)
+    start_time = _validated_start_time(request)
+    if start_time:
+        queryset = queryset.filter(timestamp__gte=start_time)
+    rows = _latest_rows(queryset, _MAX_API_ROWS)
+    return JsonResponse(
+        [
+            {
+                "timestamp": row.timestamp.isoformat(),
+                "price": float(row.price),
+                "deltadelta": float(row.deltadelta or 0),
+                "div_DVA_prev_NDA": float(row.div_DVA_prev_NDA or 0),
+                "nda": float(row.nda or 0),
+            }
+            for row in rows
+        ],
+        safe=False,
     )
 
-    empty_metrics = {
-        "win_rate": 0, "avg_profit": 0, "avg_win": 0, "avg_loss": 0,
-        "risk_reward": 0, "profit_factor": 0, "max_win": 0, "max_loss": 0,
-    }
 
-    if not logs.exists():
-        return JsonResponse({
-            "current_capital": float(config.start_capital),
-            "tank": 0,
-            "buy_orders": 0, "sell_orders": 0,
-            "profitable_sells": 0, "unprofitable_sells": 0,
-            "win_rate": 0, "avg_profit_trade": 0, "avg_win": 0, "avg_loss": 0,
-            "risk_reward": 0, "profit_factor": 0, "biggest_win": 0, "biggest_loss": 0,
-            "sharpe": 0, "sharpe_ratio": 0,
-            "max_drawdown": 0, "current_drawdown": 0,
-            "equity": [], "equity_timestamps": [], "equity_curve": [],
-            "metrics": empty_metrics,
-        })
+@login_required
+@require_GET
+def trades_api(request):
+    config = get_object_or_404(
+        Configuration,
+        id=request.GET.get("config_id"),
+        user=request.user,
+    )
+    symbol = request.GET.get("symbol", "").strip()
+    if symbol not in _symbols(config):
+        return JsonResponse({"error": "Ungültiges Symbol"}, status=400)
+    queryset = config.logs.filter(symbol=symbol)
+    start_time = _validated_start_time(request)
+    if start_time:
+        queryset = queryset.filter(timestamp__gte=start_time)
+    rows = _latest_rows(queryset, _MAX_API_ROWS)
+    return JsonResponse(
+        [
+            {
+                "timestamp": row.timestamp.isoformat(),
+                "action": row.action,
+                "price": float(row.price),
+            }
+            for row in rows
+        ],
+        safe=False,
+    )
 
-    equity = []
-    returns = []
-    # BUGFIX: "peak" (das bisherige Allzeithoch des Kapitals) wurde vorher
-    # NIE aktualisiert - dadurch blieb max_drawdown/current_drawdown immer 0
-    # ("Performance Metriken werden nicht berechnet"). peak wird jetzt bei
-    # jedem Log-Eintrag korrekt auf das bisherige Maximum angehoben.
-    peak = None
-    max_drawdown = Decimal("0")
-    current_drawdown = Decimal("0")
-    prev_capital = None
 
-    buy_orders = 0
-    sell_orders = 0
-    profitable_sells = 0
-    unprofitable_sells = 0
-    sell_pls = []
-    last_log = None
+@login_required
+@require_GET
+def info_api(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    total_profit = _realized_profit(config)
+    window_profit = sum(
+        (log.pl_nominal for log in logs if log.action == "sell"),
+        Decimal(0),
+    )
+    current_capital, equity = _portfolio_series(
+        config,
+        logs,
+        opening_profit=total_profit - window_profit,
+    )
+    metrics = calculate_performance_metrics(logs)
 
-    for log in logs:
-        last_log = log
-        cap = log.current_capital
-        equity.append({"t": log.timestamp.isoformat(), "v": float(cap)})
+    peak = float(config.start_capital)
+    max_drawdown = 0.0
+    current_drawdown = 0.0
+    sell_returns = []
+    previous_capital = float(config.start_capital)
+    for point, log in zip(equity, logs):
+        capital = point["v"]
+        peak = max(peak, capital)
+        current_drawdown = (peak - capital) / peak if peak > 0 else 0
+        max_drawdown = max(max_drawdown, current_drawdown)
+        if log.action == "sell":
+            sell_returns.append(
+                (capital - previous_capital) / previous_capital if previous_capital else 0
+            )
+            previous_capital = capital
 
-        if prev_capital is not None:
-            r = (cap - prev_capital) / prev_capital if prev_capital != 0 else Decimal("0")
-            returns.append(float(r))
-        prev_capital = cap
-
-        if peak is None or cap > peak:
-            peak = cap
-
-        if peak and peak > 0:
-            drawdown = max(Decimal("0"), (peak - cap) / peak)
-        else:
-            drawdown = Decimal("0")
-
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
-        current_drawdown = drawdown
-
-        if log.action == "buy":
-            buy_orders += 1
-        elif log.action == "sell":
-            sell_orders += 1
-            sell_pls.append(log.pl_nominal)
-            if log.pl_nominal > 0:
-                profitable_sells += 1
-            else:
-                unprofitable_sells += 1
-
-    # Sharpe Ratio
-    if len(returns) > 1:
-        mean = sum(returns) / len(returns)
-        variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
-        std = math.sqrt(variance)
-        sharpe = (mean / std) * math.sqrt(252) if std > 0 else 0
+    if len(sell_returns) > 1:
+        mean = sum(sell_returns) / len(sell_returns)
+        variance = sum((value - mean) ** 2 for value in sell_returns) / (len(sell_returns) - 1)
+        standard_deviation = math.sqrt(variance)
+        sharpe = mean / standard_deviation * math.sqrt(252) if standard_deviation else 0
     else:
         sharpe = 0
 
-    wins = [p for p in sell_pls if p > 0]
-    losses = [p for p in sell_pls if p <= 0]
-    win_rate = (len(wins) / len(sell_pls) * 100) if sell_pls else 0
-    avg_win = float(sum(wins) / len(wins)) if wins else 0
-    avg_loss = float(sum(losses) / len(losses)) if losses else 0
-    avg_profit_trade = float(sum(sell_pls) / len(sell_pls)) if sell_pls else 0
-    risk_reward = (avg_win / abs(avg_loss)) if avg_loss else 0
-    gross_win = float(sum(wins)) if wins else 0
-    gross_loss = float(abs(sum(losses))) if losses else 0
-    profit_factor = (gross_win / gross_loss) if gross_loss else 0
-    biggest_win = float(max(sell_pls)) if sell_pls else 0
-    biggest_loss = float(min(sell_pls)) if sell_pls else 0
+    buy_orders = sum(log.action == "buy" for log in logs)
+    sell_orders = sum(log.action == "sell" for log in logs)
+    return JsonResponse(
+        {
+            "current_capital": float(current_capital),
+            "tank": float(current_capital - config.start_capital),
+            "buy_orders": buy_orders,
+            "sell_orders": sell_orders,
+            "profitable_sells": metrics["total_wins"],
+            "unprofitable_sells": metrics["total_losses"],
+            "win_rate": metrics["win_rate"],
+            "avg_profit_trade": metrics["avg_profit"],
+            "avg_win": metrics["avg_win"],
+            "avg_loss": metrics["avg_loss"],
+            "risk_reward": metrics["risk_reward"],
+            "profit_factor": metrics["profit_factor"],
+            "biggest_win": metrics["max_win"],
+            "biggest_loss": metrics["max_loss"],
+            "sharpe": round(sharpe, 3),
+            "sharpe_ratio": round(sharpe, 3),
+            "max_drawdown": round(max_drawdown * 100, 2),
+            "current_drawdown": round(current_drawdown * 100, 2),
+            "equity": equity,
+            "equity_timestamps": [point["t"] for point in equity],
+            "equity_curve": [point["v"] for point in equity],
+            "metrics": metrics,
+        }
+    )
 
-    metrics = {
-        "win_rate": round(win_rate, 2),
-        "avg_profit": round(avg_profit_trade, 4),
-        "avg_win": round(avg_win, 4),
-        "avg_loss": round(avg_loss, 4),
-        "risk_reward": round(risk_reward, 2),
-        "profit_factor": round(profit_factor, 2),
-        "max_win": round(biggest_win, 4),
-        "max_loss": round(biggest_loss, 4),
-    }
-
-    return JsonResponse({
-        "current_capital": float(last_log.current_capital),
-        "tank": float(last_log.tank),
-        "buy_orders": buy_orders,
-        "sell_orders": sell_orders,
-        "profitable_sells": profitable_sells,
-        "unprofitable_sells": unprofitable_sells,
-        "win_rate": metrics["win_rate"],
-        "avg_profit_trade": metrics["avg_profit"],
-        "avg_win": metrics["avg_win"],
-        "avg_loss": metrics["avg_loss"],
-        "risk_reward": metrics["risk_reward"],
-        "profit_factor": metrics["profit_factor"],
-        "biggest_win": metrics["max_win"],
-        "biggest_loss": metrics["max_loss"],
-        "sharpe": round(sharpe, 3),
-        "sharpe_ratio": round(sharpe, 3),
-        "max_drawdown": round(float(max_drawdown) * 100, 2),
-        "current_drawdown": round(float(current_drawdown) * 100, 2),
-        "equity": equity,
-        "equity_timestamps": [e["t"] for e in equity],
-        "equity_curve": [e["v"] for e in equity],
-        "metrics": metrics,
-    })
 
 @login_required
+@require_GET
 def bot_status_api(request):
-    config_id = request.GET.get('config_id')
+    config_id = request.GET.get("config_id")
     if not config_id:
         return JsonResponse({"error": "config_id fehlt"}, status=400)
-    try:
-        config = Configuration.objects.get(id=config_id, user=request.user)
-    except Configuration.DoesNotExist:
-        return JsonResponse({"error": "Configuration not found"}, status=404)
-
-    # Selbstheilung: Auf Render Free Tier kann der ganze Prozess jederzeit neu
-    # starten (Crash, OOM, Redeploy) - dabei geht die In-Memory-Bot-Registry
-    # verloren, aber Configuration.is_running bleibt in der DB stehen. Ohne
-    # diesen Check bliebe der Bot dann für immer "gestoppt", bis man ihn
-    # manuell reaktiviert. Da dieser Endpoint alle 10s vom Dashboard gepollt
-    # wird, reicht das als Selbstheilungs-Mechanismus völlig aus.
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
     if config.is_running and not bot_manager.is_running(config.id):
         try:
             bot_manager.start_bot(config)
-            logger.info("Bot fuer Konfiguration %s automatisch neu gestartet (Selbstheilung).", config.id)
-        except Exception as e:
-            logger.exception("Automatischer Neustart fuer Konfiguration %s fehlgeschlagen: %s", config.id, e)
+        except Exception as exc:
+            logger.exception("Automatischer Neustart für %s fehlgeschlagen", config.id)
+            ErrorLog.objects.create(
+                configuration=config,
+                source="views.bot_status_api",
+                message=str(exc)[:4000],
+            )
             config.is_running = False
             config.save(update_fields=["is_running"])
-
     status = bot_manager.status(config.id)
-    # DB-Flag ergaenzen: is_running kann True sein, obwohl der Thread in
-    # diesem Prozess (z.B. nach einem Render-Neustart) nicht mehr existiert -
-    # das ist ein separates, sichtbares Signal fuer den Nutzer. Nach dem
-    # Selbstheilungs-Versuch oben sollten beide Werte i.d.R. wieder
-    # uebereinstimmen.
     status["is_running_flag"] = config.is_running
     return JsonResponse(status)
 
 
 @login_required
-def error_log_view(request):
-    """Separate Seite mit den letzten Fehlern (aus der DB, nicht aus Render's
-    kurzlebigen Logs) - erleichtert das Debuggen, da Render Free Tier Logs
-    nur begrenzt aufbewahrt.
-    """
-    configs = Configuration.objects.filter(user=request.user)
-    errors = ErrorLog.objects.filter(configuration__in=configs).select_related("configuration")[:300]
-    return render(request, "trading/error_log.html", {"errors": errors})
-
-@login_required
+@require_GET
 def logs_api(request, config_id):
-    """
-    Returns all TradingLog entries for a configuration as JSON.
-    """
-    try:
-        config = Configuration.objects.get(id=config_id, user=request.user)
-    except Configuration.DoesNotExist:
-        return JsonResponse({"error": "Configuration not found"}, status=404)
-    
-    logs = config.logs.all().order_by('timestamp')
-    data = []
-    for log in logs:
-        data.append({
-            "id": log.id,
-            "timestamp": log.timestamp.isoformat(),
-            "date": log.timestamp.date().isoformat(),
-            "time": log.timestamp.time().strftime("%H:%M:%S"),
-            "symbol": log.symbol,
-            "action": log.action,
-            "price": float(log.price),
-            "fee_amount": float(log.fee_amount) if log.fee_amount is not None else 0,
-            "amount": float(log.amount) if log.amount is not None else 0,
-            "order_id": log.order_id,
-            "pl_nominal": float(log.pl_nominal) if log.pl_nominal is not None else 0,
-            "pl_relative": float(log.pl_relative) if log.pl_relative is not None else 0,
-            "total_pl": float(log.total_pl) if log.total_pl is not None else 0,
-            "current_capital": float(log.current_capital) if log.current_capital is not None else 0,
-            "tank": float(log.tank) if log.tank is not None else 0,
-        })
-    return JsonResponse(data, safe=False)
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    return JsonResponse(
+        [
+            {
+                "id": log.id,
+                "timestamp": log.timestamp.isoformat(),
+                "date": timezone.localtime(log.timestamp).date().isoformat(),
+                "time": timezone.localtime(log.timestamp).strftime("%H:%M:%S"),
+                "symbol": log.symbol,
+                "action": log.action,
+                "price": float(log.price),
+                "fee_amount": float(log.fee_amount),
+                "amount": float(log.amount),
+                "order_id": log.order_id,
+                "pl_nominal": float(log.pl_nominal),
+                "pl_relative": float(log.pl_relative),
+                "total_pl": float(log.total_pl),
+                "current_capital": float(log.current_capital),
+                "tank": float(log.tank),
+            }
+            for log in logs
+        ],
+        safe=False,
+    )
+
 
 @login_required
+@require_POST
 def manual_sell_view(request, config_id):
-    """Manueller Verkauf einer noch offenen Position (Button im Trading-
-    Logbuch bei einem Buy, dem noch kein Sell folgt). Verkauft ueber den
-    laufenden Bot zum letzten bekannten Kurs, genau wie ein automatischer
-    Sell durch die Trading-Logik.
-
-    Symbol kommt bewusst als Query-Parameter (?symbol=BTC/USDT), nicht als
-    Pfadsegment - siehe Kommentar in urls.py.
-    """
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    symbol = request.GET.get("symbol")
-    if not symbol:
-        return JsonResponse({"status": "error", "message": "symbol fehlt"}, status=400)
+    symbol = request.POST.get("symbol", "").strip()
+    if symbol not in _symbols(config):
+        return JsonResponse({"status": "error", "message": "Ungültiges Symbol"}, status=400)
     try:
         bot_manager.manual_sell(config.id, symbol)
         return JsonResponse({"status": "ok"})
-    except ValueError as e:
-        return JsonResponse({"status": "error", "message": str(e)}, status=400)
-    except Exception as e:
-        logger.exception("Manueller Verkauf fuer Konfiguration %s (%s) fehlgeschlagen: %s", config.id, symbol, e)
-        ErrorLog.objects.create(configuration=config, source="views.manual_sell_view", message=str(e)[:4000])
-        return JsonResponse({"status": "error", "message": "Verkauf fehlgeschlagen. Siehe Fehler-Log."}, status=500)
+    except ValueError as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        logger.exception("Manueller Verkauf für %s/%s fehlgeschlagen", config.id, symbol)
+        ErrorLog.objects.create(
+            configuration=config,
+            source="views.manual_sell",
+            message=str(exc)[:4000],
+        )
+        return JsonResponse(
+            {"status": "error", "message": "Verkauf fehlgeschlagen."},
+            status=500,
+        )
+
 
 @login_required
+def error_log_view(request):
+    errors = ErrorLog.objects.filter(configuration__user=request.user).select_related(
+        "configuration"
+    )[:300]
+    return render(request, "trading/error_log.html", {"errors": errors})
+
+
+def _figure_to_base64(figure, pyplot):
+    buffer = BytesIO()
+    figure.savefig(buffer, format="png", bbox_inches="tight")
+    buffer.seek(0)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    pyplot.close(figure)
+    return encoded
+
+
+def _pdf_response(request, template, context, filename, disposition="attachment"):
+    try:
+        from weasyprint import HTML
+    except (ImportError, OSError) as exc:
+        logger.exception("PDF-Engine ist nicht verfügbar")
+        return HttpResponse(f"PDF-Engine nicht verfügbar: {exc}", status=503)
+    html_string = render_to_string(template, context, request=request)
+    pdf = HTML(
+        string=html_string,
+        base_url=request.build_absolute_uri("/"),
+    ).write_pdf()
+    response = HttpResponse(pdf, content_type="application/pdf")
+    response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    return response
+
+
+@login_required
+@require_GET
 def generate_report(request, config_id):
-    """
-    Generiert einen ausführlichen Trading-Analyse-Report als PDF für die gegebene Konfiguration.
-    Der Report enthält allgemeine Statistiken, Tabellen, Charts (Häufigkeitsverteilung, Profitverlauf,
-    Profitabilitätsübersicht) und weitere nützliche Kennzahlen.
-    """
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    logs = config.logs.all().order_by('timestamp')
-    total_trades = logs.count()
-    buy_trades = logs.filter(action='buy').count()
-    sell_trades = logs.filter(action='sell').count()
-    total_profit = logs.filter(action='sell').aggregate(
-        total_profit=Sum('pl_nominal', output_field=DecimalField())
-    )['total_profit'] or Decimal('0.0')
+    logs = list(config.logs.all().order_by("timestamp", "id"))
+    sell_logs = [log for log in logs if log.action == "sell"]
+    symbol_counts = Counter(log.symbol for log in logs)
+    symbol_profits = defaultdict(Decimal)
+    daily_profits = defaultdict(Decimal)
+    symbol_profit_counts = defaultdict(lambda: {"profit": 0, "loss": 0})
+    cumulative_profit = Decimal(0)
+    profit_times = []
+    cumulative_values = []
+    for log in sell_logs:
+        symbol_profits[log.symbol] += log.pl_nominal
+        daily_profits[timezone.localtime(log.timestamp).date().isoformat()] += log.pl_nominal
+        key = "profit" if log.pl_nominal > 0 else "loss"
+        symbol_profit_counts[log.symbol][key] += 1
+        cumulative_profit += log.pl_nominal
+        profit_times.append(timezone.localtime(log.timestamp).strftime("%Y-%m-%d %H:%M"))
+        cumulative_values.append(float(cumulative_profit))
 
-    # Häufigkeitsverteilung der Symbole
-    symbol_counts = dict(Counter(log.symbol for log in logs))
+    try:
+        import matplotlib
 
-    # Erzeuge ein Balkendiagramm für die Trades pro Symbol
-    fig, ax = plt.subplots(figsize=(6, 4))
-    symbols_chart = list(symbol_counts.keys())
-    counts = list(symbol_counts.values())
-    ax.bar(symbols_chart, counts, color='skyblue')
-    ax.set_title('Trades pro Symbol')
-    ax.set_xlabel('Symbol')
-    ax.set_ylabel('Anzahl Trades')
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    bar_chart = base64.b64encode(buf.getvalue()).decode('utf-8')
-    plt.close(fig)
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        logger.exception("Diagramm-Engine ist nicht verfügbar")
+        return HttpResponse(f"Diagramm-Engine nicht verfügbar: {exc}", status=503)
 
-    # Erzeuge ein Liniendiagramm für den kumulativen Profitverlauf (global)
-    times = []
-    profits = []
-    cum_profit = Decimal('0.0')
-    for log in logs:
-        if log.action == 'sell':
-            cum_profit += log.pl_nominal
-        times.append(log.timestamp.strftime("%Y-%m-%d %H:%M"))
-        profits.append(float(cum_profit))
+    with _PLOT_LOCK:
+        figure, axis = plt.subplots(figsize=(6, 4))
+        axis.bar(list(symbol_counts), list(symbol_counts.values()), color="skyblue")
+        axis.set_title("Trades pro Symbol")
+        bar_chart = _figure_to_base64(figure, plt)
 
-    fig2, ax2 = plt.subplots(figsize=(8, 4))
-    if times:  # nur plotten, wenn Daten vorhanden sind
-        ax2.plot(times, profits, marker='o', linestyle='-', color='green')
-    ax2.set_title('Kumulativer Profitverlauf')
-    ax2.set_xlabel('Zeit')
-    ax2.set_ylabel('Profit')
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    buf2 = BytesIO()
-    plt.savefig(buf2, format='png')
-    buf2.seek(0)
-    profit_chart = base64.b64encode(buf2.getvalue()).decode('utf-8')
-    plt.close(fig2)
+        figure, axis = plt.subplots(figsize=(8, 4))
+        axis.plot(profit_times, cumulative_values, marker="o", color="green")
+        axis.set_title("Kumulativer Profitverlauf")
+        axis.tick_params(axis="x", rotation=45)
+        profit_chart = _figure_to_base64(figure, plt)
 
-    # Profit pro Symbol
-    symbol_profits = logs.filter(action='sell').values('symbol').annotate(
-        total_profit=Sum('pl_nominal', output_field=DecimalField())
-    )
-    symbol_profits_dict = {item['symbol']: item['total_profit'] for item in symbol_profits}
+        figure, axis = plt.subplots(figsize=(6, 4))
+        axis.bar(
+            list(symbol_profits),
+            [float(value) for value in symbol_profits.values()],
+            color="lightgreen",
+        )
+        axis.set_title("Profit pro Symbol")
+        profit_symbol_chart = _figure_to_base64(figure, plt)
 
-    # Erzeuge ein Balkendiagramm für den Profit pro Symbol
-    fig3, ax3 = plt.subplots(figsize=(6, 4))
-    symbols_profit_chart = list(symbol_profits_dict.keys())
-    profits_symbol = list(symbol_profits_dict.values())
-    ax3.bar(symbols_profit_chart, profits_symbol, color='lightgreen')
-    ax3.set_title('Profit pro Symbol')
-    ax3.set_xlabel('Symbol')
-    ax3.set_ylabel('Profit')
-    plt.tight_layout()
-    buf3 = BytesIO()
-    plt.savefig(buf3, format='png')
-    buf3.seek(0)
-    profit_symbol_chart = base64.b64encode(buf3.getvalue()).decode('utf-8')
-    plt.close(fig3)
+        figure, axis = plt.subplots(figsize=(8, 4))
+        axis.bar(
+            list(daily_profits),
+            [float(value) for value in daily_profits.values()],
+            color="lightcoral",
+        )
+        axis.set_title("Profit pro Tag")
+        axis.tick_params(axis="x", rotation=45)
+        profit_daily_chart = _figure_to_base64(figure, plt)
 
-    # Profit pro Tag
-    daily_profits = logs.filter(action='sell').values('timestamp__date').annotate(
-        total_profit=Sum('pl_nominal', output_field=DecimalField())
-    )
-    daily_profits_dict = {}
-    for item in daily_profits:
-        date_obj = item['timestamp__date']
-        if isinstance(date_obj, date):
-            date_str = date_obj.strftime('%Y-%m-%d')
-        else:
-            date_str = str(date_obj)
-        daily_profits_dict[date_str] = item['total_profit']
-
-    # Erzeuge ein Balkendiagramm für den Profit pro Tag
-    fig4, ax4 = plt.subplots(figsize=(8, 4))
-    dates = list(daily_profits_dict.keys())
-    profits_daily = list(daily_profits_dict.values())
-    ax4.bar(dates, profits_daily, color='lightcoral')
-    ax4.set_title('Profit pro Tag')
-    ax4.set_xlabel('Datum')
-    ax4.set_ylabel('Profit')
-    ax4.xaxis.set_major_locator(MaxNLocator(nbins=10))
-    plt.xticks(rotation=45, ha='right')
-    plt.tight_layout()
-    buf4 = BytesIO()
-    plt.savefig(buf4, format='png')
-    buf4.seek(0)
-    profit_daily_chart = base64.b64encode(buf4.getvalue()).decode('utf-8')
-    plt.close(fig4)
-
-    # Ermittlung der profitablen und unprofitablen Trades (nur Sell-Trades)
-    profitable_trades = logs.filter(action='sell', pl_nominal__gt=0).count()
-    unprofitable_trades = logs.filter(action='sell', pl_nominal__lt=0).count()
-
-    # Aufschlüsselung nach Symbol: profitable und unprofitable Trades
-    symbol_profit_counts = {}
-    for sym in symbol_counts.keys():
-        profit_count = logs.filter(action='sell', symbol=sym, pl_nominal__gt=0).count()
-        loss_count = logs.filter(action='sell', symbol=sym, pl_nominal__lt=0).count()
-        symbol_profit_counts[sym] = {'profit': profit_count, 'loss': loss_count}
-
-    # Erzeuge ein gruppiertes Balkendiagramm für die Profitabilitätsübersicht pro Symbol
-    fig5, ax5 = plt.subplots(figsize=(8, 4))
-    symbols = list(symbol_profit_counts.keys())
-    profit_counts = [symbol_profit_counts[s]['profit'] for s in symbols]
-    loss_counts = [symbol_profit_counts[s]['loss'] for s in symbols]
-    bar_width = 0.35
-    x = np.arange(len(symbols))
-    ax5.bar(x - bar_width/2, profit_counts, width=bar_width, label='Profit Trades', color='green')
-    ax5.bar(x + bar_width/2, loss_counts, width=bar_width, label='Loss Trades', color='red')
-    ax5.set_xlabel('Symbol')
-    ax5.set_ylabel('Anzahl Trades')
-    ax5.set_title('Profitabilitätsübersicht pro Symbol')
-    ax5.set_xticks(x)
-    ax5.set_xticklabels(symbols)
-    ax5.legend()
-    plt.tight_layout()
-    buf5 = BytesIO()
-    plt.savefig(buf5, format='png')
-    buf5.seek(0)
-    profitability_chart = base64.b64encode(buf5.getvalue()).decode('utf-8')
-    plt.close(fig5)
-
-    # Laufzeiten pro Symbol (optional, falls im Template benötigt)
-    symbols_list = [s.strip() for s in config.symbols.split(',') if s.strip()]
-    symbol_times = {}
-    for sym in symbols_list:
-        sym_logs = logs.filter(symbol=sym).order_by('timestamp')
-        if sym_logs.exists():
-            start_time = sym_logs.first().timestamp.strftime("%Y-%m-%d %H:%M")
-            end_time = sym_logs.last().timestamp.strftime("%Y-%m-%d %H:%M")
-            symbol_times[sym] = f"{start_time}-{end_time}"
-        else:
-            symbol_times[sym] = "no_data"
-
-    if times:
-        global_time_range = f"{times[0]}-{times[-1]}"
-    else:
-        global_time_range = "no_data"
+        chart_symbols = list(symbol_profit_counts)
+        positions = list(range(len(chart_symbols)))
+        figure, axis = plt.subplots(figsize=(8, 4))
+        axis.bar(
+            [position - 0.2 for position in positions],
+            [symbol_profit_counts[symbol]["profit"] for symbol in chart_symbols],
+            width=0.4,
+            label="Profitabel",
+            color="green",
+        )
+        axis.bar(
+            [position + 0.2 for position in positions],
+            [symbol_profit_counts[symbol]["loss"] for symbol in chart_symbols],
+            width=0.4,
+            label="Verlust",
+            color="red",
+        )
+        axis.set_xticks(positions, chart_symbols)
+        axis.legend()
+        profitability_chart = _figure_to_base64(figure, plt)
 
     context = {
-        'config': config,
-        'logs': logs,
-        'total_trades': total_trades,
-        'buy_trades': buy_trades,
-        'sell_trades': sell_trades,
-        'total_profit': total_profit,
-        'symbol_counts': symbol_counts,
-        'bar_chart': bar_chart,
-        'profit_chart': profit_chart,
-        'symbol_profits': symbol_profits_dict,
-        'profit_symbol_chart': profit_symbol_chart,
-        'daily_profits': daily_profits_dict,
-        'profit_daily_chart': profit_daily_chart,
-        'profitable_trades': profitable_trades,
-        'unprofitable_trades': unprofitable_trades,
-        'symbol_profit_counts': symbol_profit_counts,
-        'profitability_chart': profitability_chart,
-        'symbol_times': symbol_times,
+        "config": config,
+        "logs": logs,
+        "total_trades": len(logs),
+        "buy_trades": sum(log.action == "buy" for log in logs),
+        "sell_trades": len(sell_logs),
+        "total_profit": cumulative_profit,
+        "symbol_counts": dict(symbol_counts),
+        "bar_chart": bar_chart,
+        "profit_chart": profit_chart,
+        "symbol_profits": dict(symbol_profits),
+        "profit_symbol_chart": profit_symbol_chart,
+        "daily_profits": dict(daily_profits),
+        "profit_daily_chart": profit_daily_chart,
+        "profitable_trades": sum(log.pl_nominal > 0 for log in sell_logs),
+        "unprofitable_trades": sum(log.pl_nominal <= 0 for log in sell_logs),
+        "symbol_profit_counts": dict(symbol_profit_counts),
+        "profitability_chart": profitability_chart,
     }
-    html_string = render_to_string('trading/report.html', context)
-    pdf = HTML(string=html_string).write_pdf()
-
-    filename_symbol_times = "_".join([f"{sym}:{rng}" for sym, rng in symbol_times.items()])
-    response = HttpResponse(pdf, content_type='application/pdf')
-    response['Content-Disposition'] = (
-        f'attachment; filename="trading_report-config_{config.id}-{filename_symbol_times}.pdf"'
+    return _pdf_response(
+        request,
+        "trading/report.html",
+        context,
+        f"trading-report-config-{config.id}.pdf",
     )
-    return response
-    
-@login_required
-def config_list(request):
-    configs = Configuration.objects.filter(user=request.user).order_by('-id')
-    return render(request, 'trading/config_list.html', {'configs': configs})
 
-@login_required
-def config_create(request):
-    if request.method == 'POST':
-        form = ConfigurationForm(request.POST)
-        if form.is_valid():
-            config = form.save(commit=False)
-            config.user = request.user
-            config.save()
-            return redirect('config_detail', config_id=config.id)
-    else:
-        form = ConfigurationForm()
-    return render(request, 'trading/config_form.html', {'form': form})
 
-@login_required
-def config_detail(request, config_id):
-    config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    return render(request, 'trading/config_list.html', {'config': config})
+def _combination_count(params, symbol_count):
+    result = symbol_count
+    for prefix in ("acc", "nda", "deltadelta"):
+        start = params[f"{prefix}_from"]
+        end = params[f"{prefix}_to"]
+        step = params[f"{prefix}_steps"]
+        result *= math.floor((end - start) / step + 1e-9) + 1
+    return result
 
-@login_required
-def config_update(request, config_id):
-    config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    if request.method == 'POST':
-        form = ConfigurationForm(request.POST, instance=config)
-        if form.is_valid():
-            form.save()
-            return redirect('config_detail', config_id=config.id)
-    else:
-        form = ConfigurationForm(instance=config)
-    return render(request, 'trading/config_form.html', {'form': form, 'update': True})
 
 @login_required
 def backtesting_form(request, config_id):
-    """Zeigt das Backtest-Formular und Ergebnisse an, inklusive Scheduler."""
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-
-    form = BacktestForm()
-    tasks_running = BacktestTask.objects.filter(configuration=config, status__in=['pending', 'running', 'paused'])
-    tasks_scheduled = BacktestTask.objects.filter(configuration=config, status='scheduled').order_by('scheduled_start_time') # Neu: Geplante Tasks
-    tasks_completed = BacktestTask.objects.filter(configuration=config, status='completed').order_by('-completed_at')[:5]
-
-    if request.method == 'POST':
-        form = BacktestForm(request.POST)
-        if form.is_valid():
-            params = form.cleaned_data
-            symbols_str = config.symbols
-            symbols = [symbol.strip() for symbol in symbols_str.split(',')]
-
-            schedule_backtest = params.pop('schedule_backtest', False) # Aus den Parametern entfernen, da es kein Backtest-Parameter ist
-            scheduled_start_time = params.pop('scheduled_start_time', None) # Ebenso
-
-            backtest_task = BacktestTask.objects.create(
-                configuration=config, symbol=symbols_str, parameters=params, result={},
-                is_scheduled=schedule_backtest, scheduled_start_time=scheduled_start_time,
+    form = BacktestForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        params = form.cleaned_data.copy()
+        schedule_backtest = params.pop("schedule_backtest", False)
+        scheduled_start_time = params.pop("scheduled_start_time", None)
+        symbols = _symbols(config)
+        combinations = _combination_count(params, len(symbols))
+        if combinations > _MAX_TOTAL_BACKTEST_COMBINATIONS:
+            form.add_error(
+                None,
+                f"Mit allen Symbolen entstehen {combinations:,} Kombinationen; "
+                f"maximal {_MAX_TOTAL_BACKTEST_COMBINATIONS:,} sind erlaubt.",
             )
-
-            if schedule_backtest and scheduled_start_time:
-                backtest_task.status = 'scheduled' # Status auf 'scheduled' setzen
-                backtest_task.save()
-                # Keine Celery-Task-Ausführung hier, da sie geplant ist
-            else:
-                task_id = backtest_task.id
-                celery_task = dispatch_task(run_backtest, config.id, params, symbols, task_id)
-                backtest_task.celery_task_id = celery_task.id
-                backtest_task.status = 'pending' # Status auf 'pending' für sofortige Ausführung
-                backtest_task.save()
-
-            return redirect('backtesting_form', config_id=config_id)
-
-    plots = {}
-    for task_completed in tasks_completed:
-        if task_completed.result and 'symbol_results' in task_completed.result:
-            plots[task_completed.id] = {}
-            for symbol, result in task_completed.result['symbol_results'].items():
-                if result and 'report' in result:
-                    historical_prices = [log.price for log in DataLog.objects.filter(configuration=config, symbol=symbol).order_by('timestamp')]
-                    if historical_prices:
-                        plot_html = Backtesting.create_plot_for_symbol(historical_prices, result['report']).to_html(full_html=False, include_plotlyjs='cdn')
-                        plots[task_completed.id][symbol] = plot_html
-
-    context = {
-        'config': config,
-        'form': form,
-        'tasks_running': tasks_running,
-        'tasks_scheduled': tasks_scheduled, # Neu: Geplante Tasks
-        'backtests': tasks_completed,
-        'plots': plots
-    }
-    return render(request, 'trading/backtesting_form.html', context)
-
-
-@login_required
-def control_backtest(request, task_id):
-    task = get_object_or_404(BacktestTask, id=task_id)
-    action = request.POST.get('action')
-
-    if task.status == 'scheduled' and action == 'cancel': # Abbrechen von geplanten Tasks
-        task.status = 'cancelled'
-        task.save()
-        return redirect('backtesting_form', config_id=task.configuration_id)
-
-    if task.celery_task_id:
-        celery_task = AsyncResult(task.celery_task_id)
-
-        if action == 'cancel':
-            celery_task.revoke(terminate=True) # Abbruch des Celery Tasks
-            task.status = 'cancelled'
-            task.save()
-        elif action == 'pause':
-            task.pause() # Verwende die Model-Methode zum Pausieren
-        elif action == 'resume':
-            task.resume() # Verwende die Model-Methode zum Fortsetzen
         else:
-            return JsonResponse({'status': 'error', 'message': 'Ungültige Aktion'})
+            status = "scheduled" if schedule_backtest else "pending"
+            backtest_task = BacktestTask.objects.create(
+                configuration=config,
+                symbol=",".join(symbols),
+                parameters=params,
+                result={},
+                status=status,
+                is_scheduled=schedule_backtest,
+                scheduled_start_time=scheduled_start_time,
+            )
+            if not schedule_backtest:
+                celery_task = dispatch_task(
+                    run_backtest,
+                    config.id,
+                    params,
+                    symbols,
+                    backtest_task.id,
+                )
+                BacktestTask.objects.filter(id=backtest_task.id).update(
+                    celery_task_id=celery_task.id
+                )
+            return redirect("backtesting_form", config_id=config.id)
 
-        return redirect('backtesting_form', config_id=task.configuration_id)
-    else:
-        return JsonResponse({'status': 'error', 'message': 'Keine Celery Task ID gefunden'})
+    if settings.CELERY_TASK_ALWAYS_EAGER:
+        interrupted = BacktestTask.objects.filter(
+            configuration=config,
+            status__in=["pending", "running", "paused"],
+            celery_task_id__startswith="eager-",
+        )
+        for interrupted_task in interrupted:
+            if not local_task_is_active(interrupted_task.celery_task_id):
+                interrupted_task.status = "failed"
+                interrupted_task.result = {
+                    "error": "Der lokale Backtest wurde durch einen Prozessneustart unterbrochen."
+                }
+                interrupted_task.save()
 
-
-@login_required
-def backtest_results(request, task_id):
-    task = get_object_or_404(BacktestTask, id=task_id)
-    if task.status == 'completed':
-        return render(request, 'trading/backtest_results.html', {'task': task})
-    else:
-        return render(request, 'trading/backtesting_form.html', {'config_id': task.configuration_id, 'error': 'Backtest ist noch nicht abgeschlossen.'})
-
-
-@login_required
-def generate_backtest_pdf(request, task_id):
-    # Backtest-Task abrufen
-    task = get_object_or_404(BacktestTask, id=task_id)
-    if task.status != 'completed':
-        return HttpResponse("Backtest nicht verfügbar", status=400)
-
-    # Plots und Daten vorbereiten
-    plots = {}
-    if task.result and 'symbol_results' in task.result and 'global_results' in task.result:
-        global_results = task.result['global_results']
-        symbol_results = task.result['symbol_results']
-
-        # Trades pro Symbol (Balkendiagramm)
-        trades_per_symbol = global_results.get('trades_per_symbol', {})
-        fig = go.Figure([go.Bar(x=list(trades_per_symbol.keys()), y=list(trades_per_symbol.values()))])
-        fig.update_layout(title='Trades pro Symbol')
-        plots['trades_per_symbol'] = plot(fig, output_type='div', include_plotlyjs=False)
-
-        # Kumulativer Profitverlauf (Liniendiagramm)
-        cumulative_profit = global_results.get('cumulative_profit', [])
-        fig = go.Figure([go.Scatter(y=cumulative_profit, mode='lines', name='Kumulativer Profit')])
-        fig.update_layout(title='Kumulativer Profitverlauf')
-        plots['cumulative_profit'] = plot(fig, output_type='div', include_plotlyjs=False)
-
-        # Profit pro Symbol (Balkendiagramm)
-        profit_per_symbol = global_results.get('profit_per_symbol', {})
-        fig = go.Figure([go.Bar(x=list(profit_per_symbol.keys()), y=list(profit_per_symbol.values()))])
-        fig.update_layout(title='Profit pro Symbol')
-        plots['profit_per_symbol'] = plot(fig, output_type='div', include_plotlyjs=False)
-
-        # Profit pro Tag (Balkendiagramm)
-        profit_per_day = global_results.get('profit_per_day', {})
-        fig = go.Figure([go.Bar(x=list(profit_per_day.keys()), y=list(profit_per_day.values()))])
-        fig.update_layout(title='Profit pro Tag')
-        plots['profit_per_day'] = plot(fig, output_type='div', include_plotlyjs=False)
-
-        # Profitabilitätsübersicht pro Symbol (gruppiertes Balkendiagramm)
-        profitable = global_results.get('profitable_trades_per_symbol', {})
-        unprofitable = global_results.get('unprofitable_trades_per_symbol', {})
-        symbols = list(profitable.keys())
-        fig = go.Figure(data=[
-            go.Bar(name='Profitable', x=symbols, y=[profitable.get(s, 0) for s in symbols]),
-            go.Bar(name='Unprofitable', x=symbols, y=[unprofitable.get(s, 0) for s in symbols])
-        ])
-        fig.update_layout(barmode='group', title='Profitabilitätsübersicht pro Symbol')
-        plots['profitability_per_symbol'] = plot(fig, output_type='div', include_plotlyjs=False)
-
-        # Preisanalyse pro Symbol (bestehende Plots)
-        plots[task.id] = {}
-        for symbol, result in symbol_results.items():
-            if result and 'report' in result:
-                historical_prices = [log.price for log in DataLog.objects.filter(
-                    configuration=task.configuration,
-                    symbol=symbol
-                ).order_by('timestamp')]
-                if historical_prices:
-                    # Hier wird angenommen, dass Backtesting.create_plot_for_symbol existiert
-                    plot_html = Backtesting.create_plot_for_symbol(
-                        historical_prices,
-                        result['report']
-                    ).to_html(full_html=False, include_plotlyjs='cdn')
-                    plots[task.id][symbol] = plot_html
-
-        # Win Rate berechnen
-        for symbol, result in symbol_results.items():
-            num_trades = result['report'].get('num_trades', 0)
-            profitable = result['report'].get('profitable_trades', 0)
-            result['report']['win_rate'] = (profitable / num_trades * 100) if num_trades > 0 else 0
-
-    # Kontext für das Template
-    context = {
-        'task': task,
-        'config': task.configuration,
-        'plots': plots
-    }
-    html_string = render_to_string('trading/backtest_report.html', context)
-    html = HTML(string=html_string)
-    pdf = html.write_pdf()
-
-    response = HttpResponse(pdf, content_type='application/pdf')
-    response['Content-Disposition'] = f'inline; filename="backtest_report-tid_{task_id}-conf_{task.configuration}.pdf"'
-    return response
-# Celery Beat Scheduler Task (tasks.py):
-@shared_task
-def schedule_backtests():
-    """
-    Sucht nach geplanten Backtests, deren Startzeit erreicht ist, und startet sie.
-    """
-    now = timezone.now()
-    scheduled_tasks = BacktestTask.objects.filter(
-        status='scheduled',
-        scheduled_start_time__lte=now
+    tasks_running = BacktestTask.objects.filter(
+        configuration=config,
+        status__in=["pending", "running", "paused"],
     )
-    logger.info(f"Gefundene geplante Tasks: {scheduled_tasks.count()}") # Logging hinzugefügt
-
-    for task in scheduled_tasks:
-        symbols_str = task.symbol
-        symbols = [symbol.strip() for symbol in symbols_str.split(',')]
-        params = task.parameters
-        task_id = task.id
-
-        logger.info(f"Starte geplanten Task {task_id} für Symbole: {symbols}, Parameter: {params}") # Logging hinzugefügt
-
-        celery_task = dispatch_task(run_backtest, task.configuration_id, params, symbols, task_id) # Hier run_backtest verwenden
-        task.celery_task_id = celery_task.id
-        task.status = 'pending' # Status auf 'pending' setzen, um die Ausführung zu starten
-        task.is_scheduled = False # Nicht mehr geplant
-        task.scheduled_start_time = None # Geplante Startzeit entfernen
-        task.save()
-        logger.info(f"Celery Task ID {celery_task.id} für geplanten Task {task_id} gestartet.") # Logging hinzugefügt
+    tasks_scheduled = BacktestTask.objects.filter(
+        configuration=config,
+        status="scheduled",
+    ).order_by("scheduled_start_time")
+    tasks_completed = BacktestTask.objects.filter(
+        configuration=config,
+        status__in=["completed", "failed", "cancelled"],
+    ).order_by("-completed_at")[:10]
+    return render(
+        request,
+        "trading/backtesting_form.html",
+        {
+            "config": config,
+            "form": form,
+            "tasks_running": tasks_running,
+            "tasks_scheduled": tasks_scheduled,
+            "backtests": tasks_completed,
+        },
+    )
 
 
 @login_required
+@require_POST
+def control_backtest(request, task_id):
+    task = get_object_or_404(
+        BacktestTask,
+        id=task_id,
+        configuration__user=request.user,
+    )
+    action = request.POST.get("action")
+    if action == "cancel":
+        task.cancel()
+        if task.celery_task_id and not task.celery_task_id.startswith("eager-"):
+            AsyncResult(task.celery_task_id).revoke(terminate=True)
+    elif action == "pause":
+        task.pause()
+    elif action == "resume":
+        task.resume()
+    else:
+        return JsonResponse({"status": "error", "message": "Ungültige Aktion"}, status=400)
+    return redirect("backtesting_form", config_id=task.configuration_id)
+
+
+@login_required
+@require_GET
+def generate_backtest_pdf(request, task_id):
+    task = get_object_or_404(
+        BacktestTask.objects.select_related("configuration"),
+        id=task_id,
+        configuration__user=request.user,
+    )
+    if task.status != "completed":
+        return HttpResponse("Backtest ist nicht abgeschlossen.", status=400)
+    return _pdf_response(
+        request,
+        "trading/backtest_report.html",
+        {"task": task, "config": task.configuration},
+        f"backtest-{task.id}.pdf",
+        disposition="inline",
+    )
+
+
+@login_required
+@require_GET
 def analyse_view(request):
-    """
-    Generiert eine Analyse-Seite mit Kauf- und Verkaufssignalen für ausgewählte Kryptowährungen.
-    """
-    symbols = request.GET.getlist('symbols')  # Nimmt eine Liste von Symbolen aus den GET-Parametern entgegen
-    timeframe = request.GET.get('timeframe', '1h')  # Nimmt den gewählten Zeitrahmen aus den GET-Parametern entgegen, Standard ist '1h'
-
+    symbols = [symbol.strip().upper() for symbol in request.GET.getlist("symbols") if symbol]
+    timeframe = request.GET.get("timeframe", "1h")
+    allowed_timeframes = {"1m", "5m", "15m", "1h", "4h", "1d"}
+    available_symbols = sorted(
+        {
+            symbol
+            for config in Configuration.objects.filter(user=request.user)
+            for symbol in _symbols(config)
+        }
+    )
     if not symbols:
-        return render(request, 'trading/analyse.html', {'error': 'Bitte wählen Sie mindestens ein Symbol aus.'})
-
-    async def fetch_and_analyze(symbol, timeframe):
-        exchange_id = 'binance'  # Hier kannst du die gewünschte Exchange festlegen
-        exchange_class = getattr(ccxt, exchange_id)
-        exchange = exchange_class()
-
-        if not exchange.has['fetchOHLCV']:
-            return {'symbol': symbol, 'error': f"Die Börse {exchange_id} unterstützt das Abrufen von OHLCV-Daten nicht."}
-
-        try:
-            # Definiere die Startzeit für die Datenabfrage (z.B. die letzten 30 Perioden)
-            limit = 30
-            now = datetime.now()
-            timeframe_timedelta = exchange.parse_timeframe(timeframe)
-            since = int((now - timedelta(seconds=limit * timeframe_timedelta)).timestamp() * 1000)
-
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-            if not ohlcv or len(ohlcv) < 2:
-                return {'symbol': symbol, 'error': f"Nicht genügend Daten für {symbol} im Zeitraum {timeframe}."}
-
-            # Implementiere hier deine Signallogik (Beispiel: Einfacher gleitender Durchschnitt Crossover)
-            # Berechne zwei einfache gleitende Durchschnitte (SMA) mit unterschiedlichen Perioden
-            short_period = 5
-            long_period = 15
-
-            closes = [candle[4] for candle in ohlcv]
-
-            def calculate_sma(data, period):
-                if len(data) < period:
-                    return None
-                return sum(data[-period:]) / period
-
-            sma_short = calculate_sma(closes, short_period)
-            sma_long = calculate_sma(closes, long_period)
-
-            signal = 'Neutral'
-            if len(closes) > long_period and sma_short and sma_long:
-                previous_sma_short = calculate_sma(closes[-short_period-1:-1], short_period)
-                previous_sma_long = calculate_sma(closes[-long_period-1:-1], long_period)
-
-                if previous_sma_short < previous_sma_long and sma_short > sma_long:
-                    signal = 'Kaufen'
-                elif previous_sma_short > previous_sma_long and sma_short < sma_long:
-                    signal = 'Verkaufen'
-
-            return {'symbol': symbol, 'signal': signal}
-
-        except ccxt.NetworkError as e:
-            return {'symbol': symbol, 'error': f"Netzwerkfehler beim Abrufen von Daten für {symbol}: {e}"}
-        except ccxt.ExchangeError as e:
-            return {'symbol': symbol, 'error': f"Börsenfehler beim Abrufen von Daten für {symbol}: {e}"}
-        except Exception as e:
-            return {'symbol': symbol, 'error': f"Ein unerwarteter Fehler ist aufgetreten für {symbol}: {e}"}
-        finally:
-            await asyncio.sleep(exchange.rateLimit / 1000) # Respektiere die Rate Limits der Börse
+        return render(
+            request,
+            "trading/analyse.html",
+            {"available_symbols": available_symbols, "selected_timeframe": timeframe},
+        )
+    if timeframe not in allowed_timeframes or len(symbols) > 10:
+        return render(
+            request,
+            "trading/analyse.html",
+            {
+                "error": "Ungültiger Zeitrahmen oder zu viele Symbole.",
+                "available_symbols": available_symbols,
+            },
+        )
 
     async def analyze_all():
-        tasks = [fetch_and_analyze(symbol, timeframe) for symbol in symbols]
-        results = await asyncio.gather(*tasks)
-        return results
+        import ccxt
+        import ccxt.async_support as ccxt_async
 
-    analysis_results = async_to_sync(analyze_all)()
+        exchange = ccxt_async.binance({"enableRateLimit": True, "timeout": 15_000})
 
-    context = {
-        'analysis_results': analysis_results,
-        'selected_symbols': symbols,
-        'selected_timeframe': timeframe,
-    }
-    return render(request, 'trading/analyse.html', context)
+        async def analyze_symbol(symbol):
+            try:
+                limit = 30
+                seconds = exchange.parse_timeframe(timeframe)
+                since = exchange.milliseconds() - limit * seconds * 1000
+                candles = await exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe,
+                    since=since,
+                    limit=limit,
+                )
+                if len(candles) < 16:
+                    return {"symbol": symbol, "error": "Nicht genügend Marktdaten."}
+                closes = [candle[4] for candle in candles]
+                short_now = sum(closes[-5:]) / 5
+                long_now = sum(closes[-15:]) / 15
+                short_previous = sum(closes[-6:-1]) / 5
+                long_previous = sum(closes[-16:-1]) / 15
+                signal = "Neutral"
+                if short_previous <= long_previous and short_now > long_now:
+                    signal = "Kaufen"
+                elif short_previous >= long_previous and short_now < long_now:
+                    signal = "Verkaufen"
+                return {"symbol": symbol, "signal": signal}
+            except ccxt.NetworkError as exc:
+                return {"symbol": symbol, "error": f"Netzwerkfehler: {exc}"}
+            except ccxt.ExchangeError as exc:
+                return {"symbol": symbol, "error": f"Börsenfehler: {exc}"}
+            except Exception as exc:
+                logger.exception("Analyse für %s fehlgeschlagen", symbol)
+                return {"symbol": symbol, "error": str(exc)}
+
+        try:
+            return await asyncio.gather(*(analyze_symbol(symbol) for symbol in symbols))
+        finally:
+            await exchange.close()
+
+    results = async_to_sync(analyze_all)()
+    return render(
+        request,
+        "trading/analyse.html",
+        {
+            "analysis_results": results,
+            "selected_symbols": symbols,
+            "selected_timeframe": timeframe,
+            "available_symbols": available_symbols,
+        },
+    )

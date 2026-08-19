@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 100
+extend-exclude = ["trading/migrations"]
+
+[tool.ruff.lint]
+ignore = [
+  "BLE001",  # Boundary handlers must log unexpected exchange/DB failures.
+  "RUF012",  # Django Meta classes intentionally use mutable class attributes.
+]

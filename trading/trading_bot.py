@@ -1,44 +1,38 @@
-import ccxt
 import asyncio
-import threading
+import inspect
 import logging
 import random
+import threading
 import time
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from functools import wraps
 
+import ccxt
 from asgiref.sync import sync_to_async
-from django.db import IntegrityError, transaction, close_old_connections, connection, OperationalError
+from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import (
+    DataError,
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+    connection,
+    transaction,
+)
 from django.db.utils import InterfaceError
 
-from .models import Configuration, DataLog, TradingLog, ErrorLog
+from .models import Configuration, DataLog, ErrorLog, TradingLog
 
 logger = logging.getLogger("trading")
+_EIGHT_PLACES = Decimal("0.00000001")
+_MAX_DECIMAL = Decimal("999999999999.99999999")
 
 
-# =========================================================
-# DB-RECONNECT-DECORATOR
-# =========================================================
-#
-# ROOT CAUSE des "connection already closed"-Bugs:
-# main_loop laeuft dauerhaft in seinem eigenen Thread/Event-Loop, komplett
-# ausserhalb jedes Django-Request-Zyklus. Django schliesst/erneuert DB-
-# Connections aber normalerweise nur ueber die Signals
-# request_started/request_finished (gesteuert von CONN_MAX_AGE) - die
-# feuern hier nie. Die db_*-Funktionen unten laufen zudem via
-# sync_to_async(thread_sensitive=False) im gemeinsamen Default-
-# ThreadPoolExecutor, dessen Threads Django thread-lokal cachet und die
-# ueber viele Sleep-Zyklen (config.time_interval) hinweg wiederverwendet
-# werden. Sobald Postgres/Render (Free Tier!) eine idle gewordene
-# Connection serverseitig kappt, crasht die naechste Query mit
-# InterfaceError/OperationalError - genau das Muster aus dem Log.
-#
-# Fix: vor jeder Query close_old_connections() aufrufen (ersetzt den hier
-# fehlenden Request-Signal-Trigger) und bei einem tatsaechlichen
-# Connection-Fehler die kaputte Connection hart schliessen + mit
-# Exponential Backoff + Jitter neu verbinden, statt den Bot abstuerzen
-# zu lassen.
-def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress_after_retries=False):
+def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress=False):
+    """Erneuert veraltete Thread-Verbindungen und wiederholt Verbindungsfehler."""
+
     def decorator(func):
+        @wraps(func)
         def wrapper(*args, **kwargs):
             attempt = 0
             while True:
@@ -50,31 +44,32 @@ def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress_after_retries
                     try:
                         connection.close()
                     except Exception:
-                        pass
-
+                        logger.debug("Defekte DB-Verbindung war bereits geschlossen")
                     if attempt > max_retries:
                         logger.error(
-                            "DB-Reconnect fehlgeschlagen nach %s Versuchen in %s: %s",
-                            attempt, func.__name__, exc,
+                            "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen: %s",
+                            func.__name__,
+                            attempt,
+                            exc,
                         )
-                        if suppress_after_retries:
+                        if suppress:
                             return None
                         raise
-
                     delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
-                    delay += random.uniform(0, delay * 0.25)  # Jitter
+                    delay += random.uniform(0, delay * 0.25)
                     logger.warning(
-                        "DB-Connection verloren in %s (Versuch %s/%s): %s -> Reconnect in %.2fs",
-                        func.__name__, attempt, max_retries, exc, delay,
+                        "DB-Verbindung in %s verloren; neuer Versuch %s/%s in %.2fs",
+                        func.__name__,
+                        attempt,
+                        max_retries,
+                        delay,
                     )
-                    time.sleep(delay)  # laeuft im Executor-Thread, blockiert die Event-Loop NICHT
+                    time.sleep(delay)
+
         return wrapper
+
     return decorator
 
-
-# =========================================================
-# DB-HILFSFUNKTIONEN (ASYNC-SAFE)
-# =========================================================
 
 @sync_to_async(thread_sensitive=False)
 @db_safe()
@@ -83,394 +78,494 @@ def db_get_config(config_id):
 
 
 @sync_to_async(thread_sensitive=False)
-@db_safe(suppress_after_retries=True)
+@db_safe(suppress=True)
 def db_create_datalog_safe(**kwargs):
     try:
         with transaction.atomic():
             DataLog.objects.create(**kwargs)
-    except IntegrityError:
-        # Duplicate → ignorieren, NICHT crashen
-        pass
+        return True
+    except (IntegrityError, DataError, InvalidOperation, ValueError) as exc:
+        logger.error("DataLog konnte nicht gespeichert werden: %s", exc)
+        return False
 
 
 @sync_to_async(thread_sensitive=False)
-@db_safe(suppress_after_retries=True)
+@db_safe(suppress=True)
+def db_trim_datalog(config_id, symbol, max_rows):
+    queryset = DataLog.objects.filter(configuration_id=config_id, symbol=symbol)
+    cutoff_id = (
+        queryset.order_by("-id").values_list("id", flat=True)[max_rows : max_rows + 1].first()
+    )
+    if cutoff_id is not None:
+        queryset.filter(id__lte=cutoff_id).delete()
+
+
+@sync_to_async(thread_sensitive=False)
+@db_safe(suppress=True)
 def db_create_tradinglog_safe(**kwargs):
     try:
         with transaction.atomic():
             TradingLog.objects.create(**kwargs)
-    except IntegrityError:
-        pass
+        return True
+    except (IntegrityError, DataError, InvalidOperation, ValueError) as exc:
+        logger.error("TradingLog konnte nicht gespeichert werden: %s", exc)
+        return False
 
 
 @sync_to_async(thread_sensitive=False)
-@db_safe(suppress_after_retries=True)
+@db_safe(suppress=True)
 def db_log_error(config_id, source, message):
     try:
-        ErrorLog.objects.create(configuration_id=config_id, source=source, message=str(message)[:4000])
+        ErrorLog.objects.create(
+            configuration_id=config_id,
+            source=source[:100],
+            message=str(message)[:4000],
+        )
     except (InterfaceError, OperationalError):
-        # WICHTIG: diese beiden NICHT hier verschlucken, sondern an
-        # db_safe() durchreichen, damit Reconnect+Retry tatsaechlich
-        # greift. Vorher fing das breite "except Exception" hier alles ab
-        # und maskierte genau den Connection-Fehler, den es eigentlich
-        # loggen sollte.
         raise
     except Exception:
-        # Alle anderen Fehler bleiben unkritisch: Fehler-Logging darf
-        # selbst niemals den Bot zum Absturz bringen.
-        pass
+        logger.exception("Fehler konnte nicht in ErrorLog gespeichert werden")
 
 
-@sync_to_async(thread_sensitive=False)
-@db_safe()
-def db_get_recent_deltadelta(symbol, config_id, limit=10):
+@db_safe(suppress=True)
+def db_restore_state(config_id):
     return list(
-        DataLog.objects.filter(
-            configuration_id=config_id,
-            symbol=symbol
-        ).order_by("-timestamp")[:limit]
+        TradingLog.objects.filter(configuration_id=config_id)
+        .order_by("timestamp", "id")
+        .values(
+            "symbol",
+            "action",
+            "price",
+            "amount",
+            "fee_amount",
+            "pl_nominal",
+        )
     )
 
 
-# =========================================================
-# TRADING BOT
-# =========================================================
+def _bounded(value):
+    value = Decimal(value)
+    return max(-_MAX_DECIMAL, min(_MAX_DECIMAL, value)).quantize(
+        _EIGHT_PLACES,
+        rounding=ROUND_HALF_UP,
+    )
+
 
 class TradingBot(threading.Thread):
-
-    def __init__(self, config: Configuration):
-        super().__init__(daemon=True)
-
+    def __init__(self, config, on_exit=None):
+        super().__init__(daemon=True, name=f"trading-bot-{config.id}")
         self.config_id = config.id
         self.config = config
+        self.on_exit = on_exit
         self.running = True
-
-        self.symbols = [s.strip() for s in config.symbols.split(",")]
-        self.price_buffer = {s: [] for s in self.symbols}
+        self.loop = None
+        self.exchange = self._setup_exchange()
+        self.symbols = []
+        self.price_buffer = {}
         self.positions = {}
-
-        # Laufendes, realisiertes Gesamtergebnis (Summe aller Sell-P/L) -
-        # wird fuer current_capital/tank in jedem TradingLog-Eintrag
-        # gebraucht (siehe execute_trade). BUGFIX: vorher wurde hier immer
-        # fest Decimal(0) geschrieben, wodurch "Aktuelles Kapital" und
-        # "Tank" im Dashboard nach jedem Trade sofort wieder auf 0
-        # zurueckfielen und Sharpe/Drawdown (die auf current_capital
-        # aufbauen) nie sinnvolle Werte bekamen.
         self.realized_pl = Decimal(0)
-
-        # Sichtbarkeit fuer die UI/API (siehe bot_status_api): ohne das
-        # war ein dauerhaft scheiternder fetch_ticker() (z.B. Binance
-        # blockiert die Region/IP von Render mit HTTP 451) fuer den Nutzer
-        # komplett unsichtbar - der Bot "lief", aber es gab weder Fehler
-        # noch Daten irgendwo sichtbar außer im Server-Log.
         self.last_error = None
         self.last_error_at = None
         self.last_success_at = None
         self.started_at = time.time()
-
-        # BUGFIX (Exit 137 / OOM-Kill): self.loop = asyncio.new_event_loop()
-        # stand vorher hier im Konstruktor, der im Django-Request-Thread
-        # (Selbstheilung/config_activate) laeuft. Jede neu erzeugte Event-
-        # Loop oeffnet sofort OS-Ressourcen (epoll-FD, self-pipe). Schlug
-        # danach z.B. _setup_exchange() fehl (falscher Exchange-Name in der
-        # Konfiguration), wurde das TradingBot-Objekt verworfen, OHNE dass
-        # die bereits geoeffnete Loop je geschlossen wurde - ein Leck bei
-        # jedem fehlgeschlagenen (Neu-)Start. Die Loop wird jetzt stattdessen
-        # erst in run() erzeugt, also im eigenen Bot-Thread, und in einem
-        # finally-Block wieder geschlossen (siehe run()/stop()).
-        self.loop = None
-        self.exchange = self._setup_exchange()
-
-        self.start_time = time.time() + config.countdown * 60
-        self.start_countdown_over = False
-
-    # -----------------------------------------------------
+        self._data_log_counts = {}
+        self._persisted_errors = {}
+        self.start_time = time.time() + max(0, config.countdown) * 60
+        self.start_countdown_over = config.countdown <= 0
+        self._sync_symbols()
+        self._restore_state()
 
     def _setup_exchange(self):
-        exchange_cls = getattr(ccxt, self.config.exchange)
-        params = {"enableRateLimit": True}
-
+        exchange_class = getattr(ccxt, self.config.exchange, None)
+        if exchange_class is None:
+            raise ValueError(f"Unbekannte Exchange: {self.config.exchange}")
+        default_type = "swap" if self.config.market == "futures" else "spot"
+        params = {
+            "enableRateLimit": True,
+            "timeout": 15_000,
+            "options": {"defaultType": default_type},
+        }
         if self.config.api_key and self.config.secret_key:
-            params["apiKey"] = self.config.api_key
-            params["secret"] = self.config.secret_key
+            params.update(apiKey=self.config.api_key, secret=self.config.secret_key)
+        return exchange_class(params)
 
-        return exchange_cls(params)
+    def _sync_symbols(self):
+        configured = [symbol.strip() for symbol in self.config.symbols.split(",") if symbol.strip()]
+        # Entfernte Symbole mit offener Position bleiben bis zum Verkauf aktiv.
+        self.symbols = list(dict.fromkeys(configured + list(self.positions)))
+        for symbol in self.symbols:
+            self.price_buffer.setdefault(symbol, [])
+        for symbol in list(self.price_buffer):
+            if symbol not in self.symbols:
+                del self.price_buffer[symbol]
 
-    # -----------------------------------------------------
+    def _restore_state(self):
+        logs = db_restore_state(self.config_id) or []
+        self.realized_pl = sum(
+            (log["pl_nominal"] or Decimal(0) for log in logs if log["action"] == "sell"),
+            Decimal(0),
+        )
+        for log in logs:
+            if log["action"] == "buy":
+                self.positions[log["symbol"]] = {
+                    "price": log["price"],
+                    "amount": log["amount"],
+                    "buy_fee": log["fee_amount"],
+                }
+            elif log["action"] == "sell":
+                self.positions.pop(log["symbol"], None)
+        self._sync_symbols()
 
     def run(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         try:
             self.loop.run_until_complete(self.main_loop())
+        except Exception as exc:
+            logger.exception("Bot %s wurde unerwartet beendet", self.config_id)
+            self.last_error = str(exc)
+            self.last_error_at = time.time()
         finally:
-            # Sauber aufraeumen, statt die Loop (und damit ihre offenen
-            # FDs) einfach haengen zu lassen - relevant vor allem bei
-            # haeufigem Start/Stop durch die Selbstheilung auf Render.
             try:
+                self.loop.run_until_complete(self._close_exchange())
                 self.loop.run_until_complete(self.loop.shutdown_asyncgens())
             except Exception:
-                pass
-            try:
-                if hasattr(self.exchange, "close"):
-                    self.loop.run_until_complete(self.exchange.close())
-            except Exception:
-                pass
+                logger.debug("Exchange/Event-Loop-Cleanup fehlgeschlagen", exc_info=True)
             self.loop.close()
+            close_old_connections()
+            if self.on_exit:
+                self.on_exit(self.config_id, self)
+
+    async def _close_exchange(self):
+        close_method = getattr(self.exchange, "close", None)
+        if not close_method:
+            return
+        result = close_method()
+        if inspect.isawaitable(result):
+            await result
 
     def stop(self):
         self.running = False
 
-    # =====================================================
-    # MAIN LOOP
-    # =====================================================
+    async def _persist_error(self, key, source, message):
+        now = time.time()
+        text = str(message)
+        previous_time, previous_text = self._persisted_errors.get(key, (0, None))
+        # Identische Dauerfehler (z. B. eine regional blockierte Exchange)
+        # höchstens alle 15 Minuten persistieren, damit die DB nicht vollläuft.
+        if text != previous_text or now - previous_time >= 15 * 60:
+            await db_log_error(self.config_id, source, text)
+            self._persisted_errors[key] = (now, text)
 
     async def main_loop(self):
         while self.running:
             try:
                 self.config = await db_get_config(self.config_id)
-
-                results = await asyncio.gather(
-                    *(self.process_symbol(s) for s in self.symbols),
-                    return_exceptions=True
-                )
-
+                self._sync_symbols()
                 any_success = False
-                for sym, res in zip(self.symbols, results):
-                    if isinstance(res, Exception):
-                        logger.error(f"{sym} Fehler: {res}")
-                        self.last_error = f"{sym}: {res}"
-                        self.last_error_at = time.time()
-                        await db_log_error(self.config_id, "trading_bot.process_symbol", f"{sym}: {res}")
-                    else:
+                # Das synchrone CCXT-Objekt ist nicht thread-sicher. Daher werden
+                # Symbole bewusst nacheinander statt parallel abgefragt.
+                for symbol in self.symbols:
+                    if not self.running:
+                        break
+                    try:
+                        await self.process_symbol(symbol)
                         any_success = True
-
+                    except Exception as exc:
+                        logger.error("%s Fehler: %s", symbol, exc)
+                        self.last_error = f"{symbol}: {exc}"
+                        self.last_error_at = time.time()
+                        await self._persist_error(
+                            f"symbol:{symbol}",
+                            "trading_bot.process_symbol",
+                            f"{symbol}: {exc}",
+                        )
                 if any_success:
                     self.last_success_at = time.time()
 
-                # WICHTIG: nicht in einem einzigen grossen asyncio.sleep()
-                # warten, sondern in kleinen 1s-Schritten und dabei
-                # self.running immer wieder pruefen. Sonst reagiert der
-                # Thread erst nach bis zu time_interval Sekunden auf
-                # stop() - und genau das war der Grund fuer die 502-Fehler
-                # nach dem Logout/Deaktivieren (siehe TradingBotManager.stop_bot).
-                remaining = self.config.time_interval
+                remaining = max(1, self.config.time_interval)
                 while remaining > 0 and self.running:
                     step = min(1, remaining)
                     await asyncio.sleep(step)
                     remaining -= step
-
-            except Exception as e:
-                logger.exception(f"Main Loop Error: {e}")
-                self.last_error = f"main_loop: {e}"
+            except ObjectDoesNotExist:
+                logger.info("Konfiguration %s wurde gelöscht; Bot stoppt", self.config_id)
+                self.running = False
+            except Exception as exc:
+                logger.exception("Main-Loop-Fehler für Bot %s", self.config_id)
+                self.last_error = f"main_loop: {exc}"
                 self.last_error_at = time.time()
-                await db_log_error(self.config_id, "trading_bot.main_loop", str(e))
+                await self._persist_error("main_loop", "trading_bot.main_loop", exc)
                 await asyncio.sleep(2)
-
-    # =====================================================
-    # SYMBOL PIPELINE
-    # =====================================================
 
     async def process_symbol(self, symbol):
         await self.fetch_price(symbol)
         await self.calculate_and_store(symbol)
 
-    # -----------------------------------------------------
-
     async def fetch_price(self, symbol):
-        ticker = await self.loop.run_in_executor(
-            None, self.exchange.fetch_ticker, symbol
-        )
-
-        price = Decimal(str(ticker["last"]))
-        buf = self.price_buffer[symbol]
-        buf.append(price)
-
-        if len(buf) > 10:
-            buf.pop(0)
-
-    # =====================================================
-    # INDICATORS
-    # =====================================================
+        future = self.loop.run_in_executor(None, self.exchange.fetch_ticker, symbol)
+        ticker = await asyncio.wait_for(future, timeout=20)
+        raw_price = ticker.get("last") or ticker.get("close")
+        if raw_price is None:
+            raise ValueError("Exchange lieferte keinen letzten Preis")
+        price = Decimal(str(raw_price))
+        if not price.is_finite() or price <= 0:
+            raise ValueError(f"Ungültiger Preis: {raw_price}")
+        buffer = self.price_buffer.setdefault(symbol, [])
+        buffer.append(price)
+        del buffer[:-10]
 
     async def calculate_and_store(self, symbol):
         prices = self.price_buffer[symbol]
         if len(prices) < 3:
             return
-
-        p0, p1, p2 = prices[-1], prices[-2], prices[-3]
-
-        da = p0 - p1
-        nda = (da / p1 * 100) if p1 else Decimal(0)
-
-        prev_da = p1 - p2
-        prev_nda = (prev_da / p1 * 100) if p1 else Decimal(0)
-
-        dva = nda - prev_nda
-        deltadelta = (nda + prev_nda) / 2
-        div_dva = (dva / prev_nda) if prev_nda else Decimal(0)
-
+        current, previous, older = prices[-1], prices[-2], prices[-3]
+        current_da = current - previous
+        nda = current_da / previous * 100 if previous else Decimal(0)
+        previous_da = previous - older
+        previous_nda = previous_da / previous * 100 if previous else Decimal(0)
+        dva = nda - previous_nda
+        deltadelta = (nda + previous_nda) / 2
+        acceleration = dva / previous_nda if previous_nda else Decimal(0)
         max_price = max(prices)
         min_price = min(prices)
         mvd = min_price / max_price if max_price else Decimal(0)
 
-        await db_create_datalog_safe(
+        saved = await db_create_datalog_safe(
             configuration_id=self.config_id,
             symbol=symbol,
-            price=p0,
-            max_price=max_price,
-            min_price=min_price,
-            current_da=da,
-            nda=nda,
-            prev_da=prev_da,
-            prev_nda=prev_nda,
-            dva=dva,
-            deltadelta=deltadelta,
-            div_DVA_prev_NDA=div_dva,
-            mvd=mvd
+            price=_bounded(current),
+            max_price=_bounded(max_price),
+            min_price=_bounded(min_price),
+            current_da=_bounded(current_da),
+            nda=_bounded(nda),
+            prev_da=_bounded(previous_da),
+            prev_nda=_bounded(previous_nda),
+            dva=_bounded(dva),
+            deltadelta=_bounded(deltadelta),
+            div_DVA_prev_NDA=_bounded(acceleration),
+            mvd=_bounded(mvd),
         )
+        if saved:
+            count = self._data_log_counts.get(symbol, 0) + 1
+            self._data_log_counts[symbol] = count
+            if count % settings.DATA_LOG_CLEANUP_EVERY == 0:
+                await db_trim_datalog(
+                    self.config_id,
+                    symbol,
+                    settings.MAX_DATA_LOGS_PER_SYMBOL,
+                )
+        await self.check_trading(symbol, current, nda, deltadelta, acceleration)
 
-        await self.check_trading(symbol, p0, nda, deltadelta, div_dva)
+    def _global_loss_limit_reached(self):
+        threshold = Decimal(str(self.config.sales_stop_threshold or 0))
+        if threshold <= 0:
+            return False
+        limit = self.config.start_capital * threshold / Decimal(100)
+        return self.realized_pl <= -limit
 
-    # =====================================================
-    # TRADING LOGIC
-    # =====================================================
+    def _available_capital(self):
+        allocated = sum(
+            position["amount"] * position["price"] + position["buy_fee"]
+            for position in self.positions.values()
+        )
+        return self.config.start_capital + self.realized_pl - allocated
 
-    async def check_trading(self, symbol, price, nda, deltadelta, div_dva):
-
-        # Countdown
+    async def check_trading(self, symbol, price, nda, deltadelta, acceleration):
         if not self.start_countdown_over:
             if time.time() >= self.start_time:
                 self.start_countdown_over = True
             return
 
-        # SELL
         if symbol in self.positions:
-            entry = self.positions[symbol]["price"]
-            pl_pct = (price - entry) / entry * 100
-
-            if pl_pct >= self.config.take_profit or pl_pct <= -self.config.stop_loss:
+            entry_price = self.positions[symbol]["price"]
+            profit_percent = (price - entry_price) / entry_price * 100
+            if (
+                profit_percent >= self.config.take_profit
+                or profit_percent <= -self.config.stop_loss
+                or self._global_loss_limit_reached()
+            ):
                 await self.execute_trade(symbol, "sell")
-                return
+            return
 
-        # BUY
+        buy_fee = self.config.trade_amount * self.config.fee / Decimal(100)
+        if self._global_loss_limit_reached() or self._available_capital() < (
+            self.config.trade_amount + buy_fee
+        ):
+            return
         if (
-            symbol not in self.positions
-            and nda > self.config.nda_threshold_buy
+            nda > self.config.nda_threshold_buy
             and deltadelta > self.config.deltadelta_threshold_buy
-            and div_dva > self.config.div_DVA_prev_NDA_threshold_buy
+            and acceleration > self.config.div_DVA_prev_NDA_threshold_buy
         ):
             await self.execute_trade(symbol, "buy")
 
-    # =====================================================
-    # ORDER EXECUTION
-    # =====================================================
-
     async def execute_trade(self, symbol, side):
+        if symbol not in self.price_buffer or not self.price_buffer[symbol]:
+            raise ValueError(f"Kein aktueller Preis für {symbol}")
         price = self.price_buffer[symbol][-1]
-        amount = (self.config.trade_amount / price).quantize(
-            Decimal("1e-8"), rounding=ROUND_HALF_UP
-        )
-
-        fee = amount * price * self.config.fee / 100
         pl_nominal = Decimal(0)
 
-        if side == "sell":
-            entry = self.positions.pop(symbol)
-            pl_nominal = (price - entry["price"]) * amount - fee
+        if side == "buy":
+            if symbol in self.positions:
+                raise ValueError(f"Für {symbol} ist bereits eine Position offen")
+            amount = (self.config.trade_amount / price).quantize(
+                _EIGHT_PLACES,
+                rounding=ROUND_HALF_UP,
+            )
+            cost = amount * price
+            fee = cost * self.config.fee / Decimal(100)
+            if self._available_capital() < cost + fee:
+                raise ValueError("Nicht genügend simuliertes Kapital")
+            self.positions[symbol] = {
+                "price": price,
+                "amount": amount,
+                "buy_fee": fee,
+            }
+        elif side == "sell":
+            if symbol not in self.positions:
+                raise ValueError(f"Keine offene Position für {symbol}")
+            position = self.positions.pop(symbol)
+            amount = position["amount"]
+            proceeds = amount * price
+            fee = proceeds * self.config.fee / Decimal(100)
+            invested = amount * position["price"]
+            pl_nominal = proceeds - invested - position["buy_fee"] - fee
             self.realized_pl += pl_nominal
+        else:
+            raise ValueError(f"Unbekannte Orderseite: {side}")
 
-        # BUGFIX: current_capital/tank/total_pl wurden vorher fest auf 0
-        # bzw. auf den einzelnen Trade-P/L geschrieben, statt den
-        # laufenden Gesamtstand ueber alle bisherigen Trades abzubilden.
-        # Dashboard/Equity-Kurve/Sharpe erwarten hier einen echten,
-        # monoton fortgeschriebenen Snapshot pro Log-Zeile.
+        return_basis = (
+            amount * position["price"] + position["buy_fee"] if side == "sell" else amount * price
+        )
         current_capital = self.config.start_capital + self.realized_pl
-
-        await db_create_tradinglog_safe(
+        saved = await db_create_tradinglog_safe(
             configuration_id=self.config_id,
             symbol=symbol,
             action=side,
-            price=price,
-            amount=amount,
-            fee_amount=fee,
-            pl_nominal=pl_nominal,
-            pl_relative=(pl_nominal / (price * amount) * 100) if price * amount else Decimal(0),
-            total_pl=self.realized_pl,
-            current_capital=current_capital,
-            tank=self.realized_pl,
-            order_id=f"sim_{side}_{time.time()}"
+            price=_bounded(price),
+            amount=_bounded(amount),
+            fee_amount=_bounded(fee),
+            pl_nominal=_bounded(pl_nominal),
+            pl_relative=_bounded(pl_nominal / return_basis * 100 if return_basis else 0),
+            total_pl=_bounded(self.realized_pl),
+            current_capital=_bounded(current_capital),
+            tank=_bounded(self.realized_pl),
+            order_id=f"paper_{side}_{time.time_ns()}",
         )
+        if not saved:
+            # Der In-Memory-Stand darf der DB bei einem Schreibfehler nicht
+            # davonlaufen. Ein fehlgeschlagener Sell wird wiederhergestellt.
+            if side == "sell":
+                self.realized_pl -= pl_nominal
+                self.positions[symbol] = position
+            else:
+                self.positions.pop(symbol, None)
+            raise RuntimeError("Trade konnte nicht gespeichert werden")
+        if side == "sell" and self.config.countdown_reset_indicators:
+            self.price_buffer[symbol] = []
 
-        if side == "buy":
-            self.positions[symbol] = {"price": price}
+    async def manual_sell(self, symbol):
+        if symbol not in self.positions:
+            raise ValueError(f"Keine offene Position für {symbol}")
+        await self.execute_trade(symbol, "sell")
 
-
-# =========================================================
-# BOT MANAGER
-# =========================================================
 
 class TradingBotManager:
     def __init__(self):
         self.bots = {}
+        self._lock = threading.RLock()
+
+    def _forget(self, config_id, bot):
+        with self._lock:
+            if self.bots.get(config_id) is bot:
+                self.bots.pop(config_id, None)
 
     def is_running(self, config_id):
-        return config_id in self.bots
+        with self._lock:
+            bot = self.bots.get(config_id)
+            if bot and bot.is_alive():
+                return True
+            if bot:
+                self.bots.pop(config_id, None)
+            return False
 
     def start_bot(self, config):
-        if config.id in self.bots:
-            return  # 🛑 läuft schon
-
-        bot = TradingBot(config)
-        bot.start()
-        self.bots[config.id] = bot
+        with self._lock:
+            if self.is_running(config.id):
+                return self.bots[config.id]
+            bot = TradingBot(config, on_exit=self._forget)
+            self.bots[config.id] = bot
+            bot.start()
+            return bot
 
     def stop_bot(self, config):
-        # WICHTIG: hier NICHT bot.join() im aufrufenden Thread ausfuehren!
-        # Dieser aufrufende Thread ist bei einem Django-View-Aufruf (z.B.
-        # config_deactivate) derselbe einzelne "thread_sensitive"-Worker-
-        # Thread, den Django/Channels fuer ALLE synchronen Views im ganzen
-        # Prozess gemeinsam benutzt. Ein blockierendes join() dort legt
-        # fuer die gesamte Laufzeit des Joins (bis zu time_interval + der
-        # Dauer eines evtl. haengenden fetch_ticker()-Calls) JEDEN anderen
-        # synchronen Request lahm - u.a. auch /logout/ und Render's eigenen
-        # Health-Check. Das war die Ursache der 502-Fehler nach dem
-        # Ausloggen/Deaktivieren.
-        #
-        # Stattdessen: sofort aus der Registry entfernen (damit is_running()
-        # ab jetzt korrekt False liefert) und das eigentliche Stoppen des
-        # Threads im Hintergrund erledigen, ohne den Aufrufer zu blockieren.
-        bot = self.bots.pop(config.id, None)
+        config_id = config.id if hasattr(config, "id") else int(config)
+        with self._lock:
+            bot = self.bots.get(config_id)
         if bot:
             bot.stop()
-            threading.Thread(target=bot.join, kwargs={"timeout": 30}, daemon=True).start()
+            threading.Thread(
+                target=bot.join,
+                kwargs={"timeout": 30},
+                daemon=True,
+                name=f"stop-bot-{config_id}",
+            ).start()
+
+    def restart_bot(self, config, before_start=None):
+        """Startet nach sauberem Thread-Ende neu, optional mit atomarer Vorbereitung."""
+        with self._lock:
+            old_bot = self.bots.get(config.id)
+
+        def prepare_and_start():
+            close_old_connections()
+            try:
+                if before_start:
+                    before_start()
+                config.refresh_from_db()
+                if config.is_running:
+                    self.start_bot(config)
+            except Exception as exc:
+                logger.exception("Neustart für Konfiguration %s fehlgeschlagen", config.id)
+                ErrorLog.objects.create(
+                    configuration_id=config.id,
+                    source="trading_bot.restart",
+                    message=str(exc)[:4000],
+                )
+            finally:
+                close_old_connections()
+
+        if not old_bot or not old_bot.is_alive():
+            prepare_and_start()
+            return
+
+        old_bot.stop()
+
+        def wait_and_restart():
+            old_bot.join(timeout=30)
+            if old_bot.is_alive():
+                logger.error("Bot %s konnte für Neustart nicht beendet werden", config.id)
+                return
+            prepare_and_start()
+
+        threading.Thread(
+            target=wait_and_restart,
+            daemon=True,
+            name=f"restart-bot-{config.id}",
+        ).start()
 
     def manual_sell(self, config_id, symbol):
-        """Verkauft eine aktuell offene Position manuell (Button im Trading-
-        Logbuch). Muss cross-thread in die eigene Event-Loop des Bots
-        eingeplant werden, da TradingBot in seinem eigenen Thread/Loop laeuft.
-        """
-        bot = self.bots.get(config_id)
+        with self._lock:
+            bot = self.bots.get(config_id)
         if not bot or not bot.is_alive() or bot.loop is None:
-            raise ValueError("Bot laeuft nicht - manueller Verkauf nicht moeglich.")
-        if symbol not in bot.positions:
-            raise ValueError(f"Keine offene Position fuer {symbol}.")
-
-        future = asyncio.run_coroutine_threadsafe(bot.execute_trade(symbol, "sell"), bot.loop)
-        # execute_trade macht selbst keine Netzwerk-Calls (nutzt den
-        # letzten bekannten Preis aus dem Buffer), daher ist ein kurzer
-        # Timeout hier unproblematisch und blockiert den Django-Request
-        # nur minimal.
-        future.result(timeout=10)
+            raise ValueError("Bot läuft nicht; manueller Verkauf ist nicht möglich")
+        future = asyncio.run_coroutine_threadsafe(bot.manual_sell(symbol), bot.loop)
+        return future.result(timeout=10)
 
     def status(self, config_id):
-        """Echter, pro-Konfiguration abrufbarer Bot-Status (fuer bot_status_api).
-
-        Ersetzt das frühere globale, nie aktualisierte BOT_STATE-Dict aus
-        trading/bot_manager.py (siehe Debugging-Protokoll, Fehler "Bot: STOPPED").
-        """
-        bot = self.bots.get(config_id)
-        if not bot:
+        with self._lock:
+            bot = self.bots.get(config_id)
+        if not bot or not bot.is_alive():
             return {
                 "running": False,
                 "config_id": config_id,
@@ -480,7 +575,7 @@ class TradingBotManager:
                 "last_success_at": None,
             }
         return {
-            "running": bot.is_alive(),
+            "running": True,
             "config_id": config_id,
             "started_at": bot.started_at,
             "last_error": bot.last_error,

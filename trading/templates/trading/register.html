@@ -7,6 +7,7 @@
             <h2 class="text-center">Registrieren</h2>
             <form method="post">
                 {% csrf_token %}
+                {% if form.non_field_errors %}<div class="alert alert-danger">{{ form.non_field_errors }}</div>{% endif %}
                 <table class="table table-bordered table-hover">
                     <tbody>
                         {% for field in form %}
@@ -14,6 +15,7 @@
                             <th class="text-right">{{ field.label_tag }}</th>
                             <td>
                                 {{ field }}
+                                {% for error in field.errors %}<div class="text-danger small">{{ error }}</div>{% endfor %}
                                 {% if field.help_text %}
                                 <small class="form-text text-muted">{{ field.help_text }}</small>
                                 {% endif %}

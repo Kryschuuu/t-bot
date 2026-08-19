@@ -1,62 +1,38 @@
 {% extends "trading/base.html" %}
+{% block title %}Konfigurationen · Trading Bot{% endblock %}
 {% block content %}
-
-<div class="container mt-4">
-    <h2>Konfigurationen</h2>
-    <a href="{% url 'config' %}" class="btn btn-primary mb-3">Neue Konfiguration erstellen</a>
-
-    <div class="table-responsive">
-        <table class="table table-striped table-hover table-bordered">
-            <thead class="table-light">
-                <tr>
-                    <th>ID</th>
-                    <th>Exchange</th>
-                    <th>Markt</th>
-                    <th>Symbole</th>
-                    <th>Startkapital</th>
-                    <th>Trade Amount</th>
-                    <th>Aktiv</th>
-                    <th>Aktionen</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for conf in configs %}
-                <tr>
-                    <td>{{ conf.id }}</td>
-                    <td>{{ conf.exchange }}</td>
-                    <td>{{ conf.market }}</td>
-                    <td>
-                        {% load custom_filters %}
-                        {% for symbol in conf.symbols|split_string:',' %}
-                            {{ symbol|strip }}<br>
-                        {% endfor %}
-                    </td>
-                    <td>{{ conf.start_capital }}</td>
-                    <td>{{ conf.trade_amount }}</td>
-                    <td>
-                        {% if conf.is_running %}
-                            <span class="badge bg-success">Ja</span>
-                        {% else %}
-                            <span class="badge bg-secondary">Nein</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <div style="display: flex; flex-direction: column; align-items: flex-start;">
-                            <a href="{% url 'dashboard' %}?config_id={{ conf.id }}" class="btn btn-sm btn-info" title="Zum Dashboard wechseln">Dashboard</a><br>
-                            <a href="{% url 'config_edit' conf.id %}" class="btn btn-sm btn-warning mb-1" title="Konfiguration bearbeiten">Bearbeiten</a>
-                            <a href="{% url 'config_delete' conf.id %}" class="btn btn-sm btn-danger mb-1" onclick="return confirm('Diese Konfiguration und alle zugehörigen Daten löschen?');" title="Konfiguration löschen">Löschen</a>
-                            {% if conf.is_running %}
-                                <a href="{% url 'config_deactivate' conf.id %}" class="btn btn-sm btn-danger mb-1" title="Konfiguration deaktivieren">Deaktivieren</a>
-                            {% else %}
-                                <a href="{% url 'config_activate' conf.id %}" class="btn btn-sm btn-success mb-1" title="Konfiguration aktivieren">Aktivieren</a>
-                            {% endif %}                            
-                        </div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h2">Konfigurationen</h1>
+    <a href="{% url 'config' %}" class="btn btn-primary">Neue Konfiguration</a>
 </div>
-
+<div class="table-responsive">
+<table class="table table-striped table-bordered align-middle">
+    <thead><tr><th>Name</th><th>Exchange / Markt</th><th>Symbole</th><th>Kapital / Trade</th><th>Status</th><th>Aktionen</th></tr></thead>
+    <tbody>
+    {% for conf in configs %}
+    <tr>
+        <td>{{ conf.name }} <span class="text-muted">#{{ conf.id }}</span></td>
+        <td>{{ conf.get_exchange_display }} / {{ conf.get_market_display }}</td>
+        <td>{{ conf.symbols }}</td>
+        <td>{{ conf.start_capital }} / {{ conf.trade_amount }}</td>
+        <td>{% if conf.is_running %}<span class="badge bg-success">Aktiviert</span>{% else %}<span class="badge bg-secondary">Deaktiviert</span>{% endif %}</td>
+        <td>
+            <div class="d-flex flex-wrap gap-1">
+                <a href="{% url 'dashboard' %}?config_id={{ conf.id }}" class="btn btn-sm btn-info">Dashboard</a>
+                <a href="{% url 'config_edit' conf.id %}" class="btn btn-sm btn-warning">Bearbeiten</a>
+                <a href="{% url 'config_delete' conf.id %}" class="btn btn-sm btn-outline-danger">Löschen</a>
+                {% if conf.is_running %}
+                <form method="post" action="{% url 'config_deactivate' conf.id %}">{% csrf_token %}<button class="btn btn-sm btn-danger" type="submit">Deaktivieren</button></form>
+                {% else %}
+                <form method="post" action="{% url 'config_activate' conf.id %}">{% csrf_token %}<button class="btn btn-sm btn-success" type="submit">Aktivieren</button></form>
+                {% endif %}
+            </div>
+        </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="6" class="text-center text-muted">Noch keine Konfiguration vorhanden.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
 {% endblock %}

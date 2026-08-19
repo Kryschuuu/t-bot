@@ -1,51 +1,71 @@
-import sys
-from django.apps import AppConfig
-from django.db.models.signals import post_migrate
 import logging
+import os
+import sys
+import threading
 
-logger = logging.getLogger('trading')
+from django.apps import AppConfig
 
-# Management-Kommandos, bei denen NIE automatisch Bots gestartet werden
-# sollen (z.B. waehrend des Render Build-Schritts "migrate" oder
-# "collectstatic" - dort laeuft noch kein Server, der laufende
-# Bot-Threads sinnvoll bedienen koennte).
+logger = logging.getLogger("trading")
 _SKIP_AUTOSTART_COMMANDS = {
-    'migrate', 'makemigrations', 'collectstatic', 'shell', 'test',
-    'createsuperuser', 'dbshell', 'showmigrations',
+    "check",
+    "collectstatic",
+    "createsuperuser",
+    "dbshell",
+    "makemigrations",
+    "migrate",
+    "run_scheduled_backtests",
+    "shell",
+    "showmigrations",
+    "test",
 }
 
 
 class TradingConfig(AppConfig):
-    default_auto_field = 'django.db.models.BigAutoField'
-    name = 'trading'
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "trading"
+    _autostart_scheduled = False
 
     def ready(self):
-        super().ready()
-        post_migrate.connect(self.start_active_bots, sender=self)
-
-    def start_active_bots(self, sender, **kwargs):
         from django.conf import settings
 
-        if not getattr(settings, 'AUTOSTART_BOTS', True):
+        if not getattr(settings, "AUTOSTART_BOTS", True):
             return
-
-        argv_command = sys.argv[1] if len(sys.argv) > 1 else ''
-        if argv_command in _SKIP_AUTOSTART_COMMANDS:
-            # post_migrate feuert auch, wenn "migrate" explizit im Build-Step
-            # aufgerufen wird - hier sollen noch keine Bot-Threads starten.
+        command = sys.argv[1] if len(sys.argv) > 1 else ""
+        if command in _SKIP_AUTOSTART_COMMANDS:
             return
+        if command == "runserver" and os.environ.get("RUN_MAIN") != "true":
+            return
+        if self.__class__._autostart_scheduled:
+            return
+        self.__class__._autostart_scheduled = True
+        # Ein kurzer Delay vermeidet Datenbankzugriffe während der App-Registry-
+        # Initialisierung. Anders als das frühere post_migrate-Signal läuft dies
+        # auch beim normalen Daphne-Prozessstart auf Render.
+        timer = threading.Timer(2, self.start_active_bots)
+        timer.daemon = True
+        timer.start()
 
-        from .models import Configuration
-        # WICHTIG: Hier die geteilte Singleton-Instanz aus trading_bot.py
-        # verwenden (nicht TradingBotManager() neu instanziieren!). Sonst
-        # landen die hier gestarteten Bots in einer eigenen, isolierten
-        # Registry, die views.py (welches den Singleton importiert) nicht
-        # kennt - Start/Stop ueber die UI wuerde dann nicht mehr zu den
-        # tatsaechlich laufenden Bot-Threads passen.
+    @staticmethod
+    def start_active_bots():
+        from django.db import close_old_connections
+
+        from .models import Configuration, ErrorLog
         from .trading_bot import bot_manager
+
+        close_old_connections()
         try:
-            active_configs = Configuration.objects.filter(is_running=True)
-            for config in active_configs:
-                bot_manager.start_bot(config)
-        except Exception as e:
-            logger.error("Fehler beim automatischen Starten der Bots: %s", e)
+            for config in Configuration.objects.filter(is_running=True).iterator():
+                try:
+                    bot_manager.start_bot(config)
+                    logger.info("Bot für Konfiguration %s automatisch gestartet", config.id)
+                except Exception as exc:
+                    logger.exception("Autostart für Konfiguration %s fehlgeschlagen", config.id)
+                    ErrorLog.objects.create(
+                        configuration=config,
+                        source="apps.autostart",
+                        message=str(exc)[:4000],
+                    )
+        except Exception:
+            logger.exception("Aktive Bots konnten beim Prozessstart nicht geladen werden")
+        finally:
+            close_old_connections()

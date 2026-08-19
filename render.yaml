@@ -1,40 +1,23 @@
-# render.yaml - Render Blueprint fuer den t-bot Paper-Trading-Bot
-#
-# Deployt genau 2 Services, beide auf dem kostenlosen "free" Instance-Typ
-# (der einzige Typ, der ohne Zahlungsdaten nutzbar ist - "worker"/"cron"
-# Service-Typen unterstuetzen KEINEN free-Plan auf Render):
-#   1. t-bot-web      - Django/Channels App via daphne (ASGI, HTTP + WebSocket)
-#   2. t-bot-db       - PostgreSQL (1 GB, laeuft 30 Tage, dann Upgrade noetig)
-#
-# Es wird bewusst KEIN Redis/Key-Value-Service und KEIN separater
-# Celery-Worker-Service definiert: Auf dem Free Tier gibt es dafuer keine
-# kostenlose Instanzoption, und die App ist so konfiguriert (siehe
-# settings.py), dass sie ohne Redis vollstaendig funktioniert:
-#   - Channels nutzt den In-Memory Channel-Layer (ausreichend, da der Free
-#     Plan ohnehin nur eine einzelne Instanz erlaubt)
-#   - Celery-Tasks laufen "eager" in einem Hintergrund-Thread desselben
-#     Web-Prozesses (siehe trading/tasks.py: dispatch_task())
-#
-# Deployment: Render Dashboard -> New -> Blueprint -> dieses Repository
-# auswaehlen. Render liest diese Datei automatisch ein.
-
+# Render Blueprint: Django/Channels Paper-Trading-Bot + PostgreSQL.
+# Auf dem Free-Plan schläft der Web-Service bei Inaktivität ein; dadurch kann
+# der In-Process-Bot dort nicht garantiert rund um die Uhr laufen.
 services:
   - type: web
     name: t-bot-web
-    runtime: python
+    runtime: docker
     plan: free
     region: frankfurt
-    branch: main
-    buildCommand: >
-      pip install -r requirements.txt &&
-      python manage.py collectstatic --noinput &&
-      python manage.py migrate
-    startCommand: daphne -b 0.0.0.0 -p $PORT trading_bot_project.asgi:application
-    healthCheckPath: /login/
+    branch: arena/01a01bc6-t-bot
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      /bin/sh -c 'python manage.py migrate --noinput && exec daphne -b 0.0.0.0 -p $PORT trading_bot_project.asgi:application'
+    healthCheckPath: /health/
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 60
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.7
       - key: SECRET_KEY
+        generateValue: true
+      - key: PASSPHRASE
         generateValue: true
       - key: DEBUG
         value: "False"
@@ -42,23 +25,10 @@ services:
         value: "True"
       - key: AUTOSTART_BOTS
         value: "True"
-      - key: PASSPHRASE
-        # WICHTIG: Das ist nur der Test-Default aus dem Debugging-Protokoll
-        # und liegt oeffentlich im Repo. Nach dem ersten Deploy im Render
-        # Dashboard -> Environment auf einen eigenen, geheimen Wert aendern!
-        value: "n7kQ2vX9mP5wL8eRt3bF"
       - key: DATABASE_URL
         fromDatabase:
           name: t-bot-db
           property: connectionString
-      # REDIS_URL bewusst NICHT gesetzt -> Free-Tier-Fallback (siehe oben).
-      # Optional bei Upgrade auf einen bezahlten Plan mit Redis/Key-Value +
-      # separatem Worker-Service manuell im Dashboard ergaenzen:
-      # - key: REDIS_URL
-      #   fromService:
-      #     name: t-bot-redis
-      #     type: keyvalue
-      #     property: connectionString
 
 databases:
   - name: t-bot-db
@@ -66,38 +36,4 @@ databases:
     region: frankfurt
     databaseName: tbot_db
     user: tbot
-
-# ---------------------------------------------------------------------------
-# Optionale Erweiterung fuer einen bezahlten Plan (NICHT Teil des Free-Tier-
-# Deployments, hier nur als Referenz auskommentiert):
-#
-# services:
-#   - type: keyvalue
-#     name: t-bot-redis
-#     plan: starter
-#     region: frankfurt
-#
-#   - type: worker
-#     name: t-bot-celery-worker
-#     runtime: python
-#     plan: starter
-#     buildCommand: pip install -r requirements.txt
-#     startCommand: celery -A trading_bot_project worker --loglevel=info
-#     envVars:
-#       - key: REDIS_URL
-#         fromService:
-#           name: t-bot-redis
-#           type: keyvalue
-#           property: connectionString
-#       - key: DATABASE_URL
-#         fromDatabase:
-#           name: t-bot-db
-#           property: connectionString
-#
-#   - type: worker
-#     name: t-bot-celery-beat
-#     runtime: python
-#     plan: starter
-#     buildCommand: pip install -r requirements.txt
-#     startCommand: celery -A trading_bot_project beat --loglevel=info
-#     envVars: [ ... wie oben ... ]
+    postgresMajorVersion: "18"

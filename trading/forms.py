@@ -1,120 +1,221 @@
-from django import forms
-from django.contrib.auth.models import User
-from .models import Configuration
-from django.utils import timezone
-import logging
+import math
+import re
 
-# Logging konfigurieren
-logger = logging.getLogger(__name__)
+from django import forms
+from django.contrib.auth import password_validation
+from django.contrib.auth.models import User
+from django.utils import timezone
+
+from .models import Configuration
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9._-]+/[A-Z0-9._:-]+$")
+_MAX_BACKTEST_COMBINATIONS = 20_000
+
 
 class RegistrationForm(forms.ModelForm):
-    password = forms.CharField(widget=forms.PasswordInput(attrs={'placeholder': 'Passwort'}))
-    confirm_password = forms.CharField(widget=forms.PasswordInput(attrs={'placeholder': 'Passwort bestätigen'}))
+    password = forms.CharField(
+        label="Passwort",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
+    confirm_password = forms.CharField(
+        label="Passwort bestätigen",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
 
     class Meta:
         model = User
-        fields = ['username', 'email']
-        help_texts = {
-            'username': 'Geben Sie Ihren gewünschten Benutzernamen ein.',
-            'email': 'Geben Sie Ihre E-Mail-Adresse ein.',
-        }
+        fields = ["username", "email"]
         widgets = {
-            'username': forms.TextInput(attrs={'placeholder': 'Benutzername'}),
-            'email': forms.EmailInput(attrs={'placeholder': 'E-Mail-Adresse'}),
+            "username": forms.TextInput(attrs={"autocomplete": "username"}),
+            "email": forms.EmailInput(attrs={"autocomplete": "email"}),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["email"].required = True
 
     def clean(self):
         cleaned_data = super().clean()
         password = cleaned_data.get("password")
-        confirm = cleaned_data.get("confirm_password")
-        if password != confirm:
-            raise forms.ValidationError("Passwörter stimmen nicht überein.")
+        if password and password != cleaned_data.get("confirm_password"):
+            self.add_error("confirm_password", "Passwörter stimmen nicht überein.")
+        if password:
+            try:
+                password_validation.validate_password(password, self.instance)
+            except forms.ValidationError as exc:
+                self.add_error("password", exc)
         return cleaned_data
 
     def save(self, commit=True):
         user = super().save(commit=False)
-        password = self.cleaned_data["password"]
-        user.set_password(password)
+        user.set_password(self.cleaned_data["password"])
         if commit:
             user.save()
         return user
 
-class LoginForm(forms.Form):
-    username = forms.CharField(widget=forms.TextInput(attrs={'placeholder': 'Benutzername'}))
-    password = forms.CharField(widget=forms.PasswordInput(attrs={'placeholder': 'Passwort'}))
 
-    def __init__(self, *args, **kwargs):
-        super(LoginForm, self).__init__(*args, **kwargs)
-        self.fields['username'].help_text = "Geben Sie Ihren Benutzernamen ein."
-        self.fields['password'].help_text = "Geben Sie Ihr Passwort ein."
+class LoginForm(forms.Form):
+    username = forms.CharField(
+        label="Benutzername",
+        widget=forms.TextInput(attrs={"autocomplete": "username", "autofocus": True}),
+    )
+    password = forms.CharField(
+        label="Passwort",
+        strip=False,
+        widget=forms.PasswordInput(attrs={"autocomplete": "current-password"}),
+    )
+
 
 class ConfigurationForm(forms.ModelForm):
     class Meta:
         model = Configuration
-        fields = ['exchange', 'market', 'symbols', 'start_capital', 'trade_amount',
-                  'sales_stop_threshold', 'take_profit', 'stop_loss', 'fee', 'api_key', 'secret_key',
-                  'countdown', 'countdown_reset_indicators', 'time_interval', 'div_DVA_prev_NDA_threshold_buy', 'deltadelta_threshold_buy', 'nda_threshold_buy']
+        fields = [
+            "name",
+            "exchange",
+            "market",
+            "symbols",
+            "start_capital",
+            "trade_amount",
+            "sales_stop_threshold",
+            "take_profit",
+            "stop_loss",
+            "fee",
+            "api_key",
+            "secret_key",
+            "countdown",
+            "countdown_reset_indicators",
+            "time_interval",
+            "div_DVA_prev_NDA_threshold_buy",
+            "deltadelta_threshold_buy",
+            "nda_threshold_buy",
+        ]
         widgets = {
-            'symbols': forms.Textarea(attrs={'rows': 3, 'placeholder': 'Symbole durch Komma trennen (z.B. BTC, ETH, LTC)'}),
-            'api_key': forms.PasswordInput(attrs={'placeholder': 'API Key eingeben'}),
-            'secret_key': forms.PasswordInput(attrs={'placeholder': 'Secret Key eingeben'}),
-            'countdown': forms.NumberInput(attrs={'placeholder': 'Countdown in Minuten'}),
-            'countdown_reset_indicators': forms.NumberInput(attrs={'placeholder': 'Countdown in Sekunden'}),
-            'time_interval': forms.NumberInput(attrs={'placeholder': 'Zeitintervall in Sekunden'}),
-            'div_DVA_prev_NDA_threshold_buy': forms.NumberInput(attrs={'placeholder': 'Beschleunigung > Wert'}),
-            'deltadelta_threshold_buy': forms.NumberInput(attrs={'placeholder': 'DeltaDelta > Wert'}),
-            'nda_threshold_buy': forms.NumberInput(attrs={'placeholder': 'DeltaDelta > Wert'}),
+            "symbols": forms.Textarea(attrs={"rows": 3, "placeholder": "BTC/USDT, ETH/USDT"}),
+            "api_key": forms.PasswordInput(attrs={"autocomplete": "off"}),
+            "secret_key": forms.PasswordInput(attrs={"autocomplete": "off"}),
+            "countdown_reset_indicators": forms.CheckboxInput(),
         }
         help_texts = {
-            'exchange': 'Wählen Sie die Krypto-Börse aus.',
-            'markt': 'Wählen Sie den Markt aus spot oder futures.',
-            'symbols': 'Geben Sie die Handelssymbole durch Komma getrennt ein.',
-            'start_capital': 'Geben Sie das Startkapital ein.',
-            'trade_amount': 'Geben Sie den Betrag pro Trade ein.',
-            'sales_stop_threshold': 'Geben Sie den Verkaufsstop-Schwellenwert ein.',
-            'take_profit': 'Geben Sie den Take-Profit-Prozentsatz ein.',
-            'stop_loss': 'Geben Sie den Stop-Loss-Prozentsatz ein.',
-            'fee': 'Geben Sie die prozentuale Handelsgebühr ein.',
-            'api_key': 'Geben Sie Ihren API Key ein.',
-            'secret_key': 'Geben Sie Ihren Secret Key ein.',
-            'countdown': 'Erst wenn der Countdown ( in Minuten) abläuft werden order getätigt.',
-            'countdown_reset_indicators': 'Reset (in Sekunden) für die Indikatoren nach einem Sell. Die Werte der Indikatoren werden genullt',
-            'time_interval': 'Geben Sie das Zeitintervall für die Preisabfrage in Sekunden ein.',
-            'div_DVA_prev_NDA_threshold_buy': 'Geben Sie den Beschleunigungs-Schwellenwert für Käufe ein.',
-            'deltadelta_threshold_buy': 'Geben Sie den DeltaDelta-Schwellenwert für Käufe ein.',
-            'nda_threshold_buy': 'Geben Sie den nda-Schwellenwert für Käufe ein.',
+            "symbols": "Handelspaare durch Kommas trennen, z. B. BTC/USDT, ETH/USDT.",
+            "sales_stop_threshold": "Gesamtverlustgrenze in Prozent; 0 deaktiviert sie.",
+            "take_profit": "Take-Profit pro Position in Prozent.",
+            "stop_loss": "Stop-Loss pro Position in Prozent.",
+            "fee": "Simulierte Handelsgebühr je Order in Prozent.",
+            "countdown": "Wartezeit nach Bot-Start in Minuten.",
+            "time_interval": "Pause zwischen zwei Preiszyklen in Sekunden.",
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance and self.instance.pk:
+            self.fields["api_key"].widget.attrs["placeholder"] = "Unverändert lassen"
+            self.fields["secret_key"].widget.attrs["placeholder"] = "Unverändert lassen"
+
+    def clean_symbols(self):
+        raw_symbols = self.cleaned_data["symbols"]
+        symbols = []
+        for raw_symbol in raw_symbols.split(","):
+            symbol = raw_symbol.strip().upper()
+            if not symbol:
+                continue
+            if not _SYMBOL_RE.fullmatch(symbol):
+                raise forms.ValidationError(
+                    f"Ungültiges Handelspaar „{symbol}“. Erwartet wird z. B. BTC/USDT."
+                )
+            if symbol not in symbols:
+                symbols.append(symbol)
+        if not symbols:
+            raise forms.ValidationError("Mindestens ein Handelspaar ist erforderlich.")
+        normalized = ",".join(symbols)
+        if len(normalized) > Configuration._meta.get_field("symbols").max_length:
+            raise forms.ValidationError("Die Symbolliste ist zu lang.")
+        return normalized
+
+    def clean_api_key(self):
+        value = self.cleaned_data.get("api_key")
+        if not value and self.instance and self.instance.pk:
+            return self.instance.api_key
+        return value
+
+    def clean_secret_key(self):
+        value = self.cleaned_data.get("secret_key")
+        if not value and self.instance and self.instance.pk:
+            return self.instance.secret_key
+        return value
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start_capital = cleaned_data.get("start_capital")
+        trade_amount = cleaned_data.get("trade_amount")
+        fee = cleaned_data.get("fee")
+        if start_capital is not None and trade_amount is not None:
+            fee_factor = 1 + ((fee or 0) / 100)
+            if trade_amount * fee_factor > start_capital:
+                self.add_error(
+                    "trade_amount",
+                    "Trade-Betrag einschließlich Kaufgebühr darf das Startkapital nicht überschreiten.",
+                )
+        return cleaned_data
+
 
 class DashboardConfigurationForm(forms.ModelForm):
     class Meta:
         model = Configuration
-        fields = ['div_DVA_prev_NDA_threshold_buy', 'deltadelta_threshold_buy', 'nda_threshold_buy', 'stop_loss', 'take_profit']
+        fields = [
+            "div_DVA_prev_NDA_threshold_buy",
+            "deltadelta_threshold_buy",
+            "nda_threshold_buy",
+            "stop_loss",
+            "take_profit",
+        ]
 
 
 class BacktestForm(forms.Form):
-    acc_from = forms.FloatField(label='Von', required=True)
-    acc_to = forms.FloatField(label='Bis', required=True)
-    acc_steps = forms.FloatField(label='Schrittgröße', required=True)
-
-    nda_from = forms.FloatField(label='Von', required=True)
-    nda_to = forms.FloatField(label='Bis', required=True)
-    nda_steps = forms.FloatField(label='Schrittgröße', required=True)
-
-    deltadelta_from = forms.FloatField(label='Von', required=True)
-    deltadelta_to = forms.FloatField(label='Bis', required=True)
-    deltadelta_steps = forms.FloatField(label='Schrittgröße', required=True)
-
-    schedule_backtest = forms.BooleanField(label='Backtest planen?', required=False) # Neu: Checkbox für Planung
-    scheduled_start_time = forms.DateTimeField(label='Geplante Startzeit', required=False, widget=forms.DateTimeInput(attrs={'type': 'datetime-local'})) # Neu: Feld für Startzeit
+    acc_from = forms.FloatField(label="Von")
+    acc_to = forms.FloatField(label="Bis")
+    acc_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
+    nda_from = forms.FloatField(label="Von")
+    nda_to = forms.FloatField(label="Bis")
+    nda_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
+    deltadelta_from = forms.FloatField(label="Von")
+    deltadelta_to = forms.FloatField(label="Bis")
+    deltadelta_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
+    schedule_backtest = forms.BooleanField(label="Backtest planen?", required=False)
+    scheduled_start_time = forms.DateTimeField(
+        label="Geplante Startzeit",
+        required=False,
+        widget=forms.DateTimeInput(attrs={"type": "datetime-local"}),
+    )
 
     def clean(self):
         cleaned_data = super().clean()
-        schedule_backtest = cleaned_data.get('schedule_backtest')
-        scheduled_start_time = cleaned_data.get('scheduled_start_time')
+        scheduled = cleaned_data.get("schedule_backtest")
+        start_time = cleaned_data.get("scheduled_start_time")
+        if scheduled and not start_time:
+            self.add_error("scheduled_start_time", "Bitte eine Startzeit angeben.")
+        elif start_time and start_time <= timezone.now():
+            self.add_error("scheduled_start_time", "Die Startzeit muss in der Zukunft liegen.")
 
-        if schedule_backtest and not scheduled_start_time:
-            self.add_error('scheduled_start_time', 'Bitte geben Sie eine geplante Startzeit an, wenn Sie den Backtest planen möchten.')
-        elif scheduled_start_time and scheduled_start_time <= timezone.now():
-            self.add_error('scheduled_start_time', 'Die geplante Startzeit muss in der Zukunft liegen.')
+        dimensions = []
+        for prefix in ("acc", "nda", "deltadelta"):
+            start = cleaned_data.get(f"{prefix}_from")
+            end = cleaned_data.get(f"{prefix}_to")
+            step = cleaned_data.get(f"{prefix}_steps")
+            if start is None or end is None or step is None:
+                continue
+            if not all(math.isfinite(value) for value in (start, end, step)):
+                self.add_error(f"{prefix}_from", "Nur endliche Zahlen sind erlaubt.")
+                continue
+            if start > end:
+                self.add_error(f"{prefix}_to", "„Bis“ muss größer oder gleich „Von“ sein.")
+                continue
+            dimensions.append(math.floor((end - start) / step + 1e-9) + 1)
 
+        if len(dimensions) == 3 and math.prod(dimensions) > _MAX_BACKTEST_COMBINATIONS:
+            raise forms.ValidationError(
+                f"Zu viele Kombinationen ({math.prod(dimensions):,}). "
+                f"Maximal {_MAX_BACKTEST_COMBINATIONS:,} pro Symbol sind erlaubt."
+            )
         return cleaned_data

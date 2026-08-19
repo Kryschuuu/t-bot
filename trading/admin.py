@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import Configuration, TradingLog, DataLog, BacktestTask
+
+from .models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 
 
 @admin.register(Configuration)
@@ -16,6 +17,7 @@ class ConfigurationAdmin(admin.ModelAdmin):
         "take_profit",
         "stop_loss",
         "fee",
+        "is_running",
         "countdown",
         "time_interval",
     )
@@ -35,26 +37,26 @@ class ConfigurationAdmin(admin.ModelAdmin):
     readonly_fields = ()
 
     fieldsets = (
-        ("Grunddaten", {
-            "fields": ("name", "user", "exchange", "market", "symbols")
-        }),
-        ("Kapital & Risiko", {
-            "fields": ("start_capital", "trade_amount", "take_profit", "stop_loss", "fee")
-        }),
-        ("Strategie", {
-            "fields": (
-                "countdown",
-                "time_interval",
-                "sales_stop_threshold",
-                "countdown_reset_indicators",
-                "div_DVA_prev_NDA_threshold_buy",
-                "deltadelta_threshold_buy",
-                "nda_threshold_buy",
-            )
-        }),
-        ("API", {
-            "fields": ("api_key", "secret_key")
-        }),
+        ("Grunddaten", {"fields": ("name", "user", "exchange", "market", "symbols")}),
+        (
+            "Kapital & Risiko",
+            {"fields": ("start_capital", "trade_amount", "take_profit", "stop_loss", "fee")},
+        ),
+        (
+            "Strategie",
+            {
+                "fields": (
+                    "countdown",
+                    "time_interval",
+                    "sales_stop_threshold",
+                    "countdown_reset_indicators",
+                    "div_DVA_prev_NDA_threshold_buy",
+                    "deltadelta_threshold_buy",
+                    "nda_threshold_buy",
+                )
+            },
+        ),
+        ("API", {"fields": ("api_key", "secret_key")}),
     )
 
 
@@ -116,3 +118,12 @@ class BacktestTaskAdmin(admin.ModelAdmin):
         "created_at",
         "completed_at",
     )
+
+
+@admin.register(ErrorLog)
+class ErrorLogAdmin(admin.ModelAdmin):
+    list_display = ("timestamp", "configuration", "source", "message")
+    list_filter = ("source",)
+    search_fields = ("message", "configuration__name", "configuration__user__username")
+    ordering = ("-timestamp",)
+    readonly_fields = ("timestamp",)

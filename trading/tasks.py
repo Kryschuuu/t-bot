@@ -1,223 +1,375 @@
-from celery import shared_task, chord
-from celery.result import allow_join_result
-from time import sleep
-from decimal import Decimal, ROUND_HALF_UP
-import numpy as np
-import random
-import json
-import threading
-import uuid
-from django.conf import settings
-from django.db import transaction
-from django.utils import timezone
-from django.core.exceptions import ObjectDoesNotExist
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
-from .models import Configuration, DataLog, BacktestTask
-from .backtesting import Backtesting
 import logging
+import threading
+import time
+import uuid
+from datetime import datetime
+from datetime import timezone as datetime_timezone
+from decimal import Decimal
+
+from celery import shared_task
+from django.conf import settings
+from django.db import close_old_connections
+from django.utils import timezone
+
+from .backtesting import Backtesting
+from .models import BacktestTask, Configuration, DataLog
 
 logger = logging.getLogger(__name__)
+_MAX_TOTAL_COMBINATIONS = 20_000
+_MAX_BACKTEST_PRICE_POINTS = 5_000
+_LOCAL_TASK_IDS = set()
+_LOCAL_TASK_IDS_LOCK = threading.Lock()
 
 
 class _EagerAsyncResultStub:
-    """Minimales Ersatz-Objekt fuer AsyncResult im Free-Tier Fallback.
-
-    Bietet nur das .id Attribut, das der aufrufende Code (views.py) in
-    BacktestTask.celery_task_id speichert. AsyncResult(diese_id) liefert
-    spaeter naturgemaess PENDING zurueck, da kein Broker/Backend involviert
-    ist - Pause/Cancel ueber Celery-Revoke funktioniert daher im Fallback-
-    Modus nicht (siehe README/Deployment-Doku).
-    """
     def __init__(self, task_id):
         self.id = task_id
 
 
-def dispatch_task(task, *args, **kwargs):
-    """Startet einen Celery-Task, Render-Free-Tier-kompatibel.
+def local_task_is_active(task_id):
+    with _LOCAL_TASK_IDS_LOCK:
+        return task_id in _LOCAL_TASK_IDS
 
-    - Ist ein echter Broker konfiguriert (REDIS_URL gesetzt, z.B. auf einem
-      bezahlten Plan mit Redis/Key-Value + separatem Worker-Service):
-      normales verteiltes .delay().
-    - Ohne Broker (Render Free Tier, CELERY_TASK_ALWAYS_EAGER=True):
-      .delay() wuerde synchron *im selben Thread* laufen und damit die
-      HTTP-Antwort blockieren (bei einer Kombinationsexplosion von
-      Backtest-Parametern potenziell fuer Minuten). Stattdessen wird der
-      Task hier in einem Hintergrund-Thread desselben Prozesses ausgefuehrt -
-      kein Broker/Worker noetig, blockiert aber den Request nicht.
-    """
+
+def dispatch_task(task, *args, **kwargs):
+    """Dispatcht über Celery oder über einen lokalen Daemon-Thread ohne Broker."""
     if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
         synthetic_id = f"eager-{uuid.uuid4()}"
+        with _LOCAL_TASK_IDS_LOCK:
+            _LOCAL_TASK_IDS.add(synthetic_id)
 
-        def _run():
+        def run_in_thread():
+            close_old_connections()
             try:
-                task.apply(args=args, kwargs=kwargs, task_id=synthetic_id, throw=True)
-            except Exception:
-                logger.exception(
-                    "Fehler bei Hintergrund-Ausfuehrung von %s (Free-Tier Fallback ohne Broker)",
-                    getattr(task, "name", task),
+                task.apply(
+                    args=args,
+                    kwargs=kwargs,
+                    task_id=synthetic_id,
+                    throw=True,
                 )
+            except Exception:
+                logger.exception("Hintergrund-Task %s ist fehlgeschlagen", task.name)
+            finally:
+                close_old_connections()
+                with _LOCAL_TASK_IDS_LOCK:
+                    _LOCAL_TASK_IDS.discard(synthetic_id)
 
         threading.Thread(
-            target=_run, daemon=True, name=f"task-{getattr(task, 'name', 'unknown')}"
+            target=run_in_thread,
+            daemon=True,
+            name=f"task-{task.name}-{synthetic_id[-8:]}",
         ).start()
         return _EagerAsyncResultStub(synthetic_id)
-
     return task.delay(*args, **kwargs)
 
-def decimal_to_str(obj):
-    """Konvertiert Decimal-Objekte rekursiv in Strings."""
-    if isinstance(obj, Decimal):
-        return str(obj)
-    if isinstance(obj, dict):
-        return {k: decimal_to_str(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [decimal_to_str(elem) for elem in obj]
-    return obj
+
+def decimal_to_str(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: decimal_to_str(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [decimal_to_str(item) for item in value]
+    return value
+
+
+def _parameter_values(start, end, step):
+    start = Decimal(str(start))
+    end = Decimal(str(end))
+    step = Decimal(str(step))
+    if step <= 0 or start > end:
+        raise ValueError("Ungültiger Parameterbereich")
+    values = []
+    current = start
+    while current <= end:
+        values.append(current)
+        current += step
+    return values
+
+
+def _historical_prices(config_id, symbol):
+    prices = list(
+        DataLog.objects.filter(configuration_id=config_id, symbol=symbol)
+        .order_by("-timestamp")
+        .values_list("price", flat=True)[:_MAX_BACKTEST_PRICE_POINTS]
+    )
+    prices.reverse()
+    return prices
+
+
+def _simulate_candidate(
+    config,
+    historical_prices,
+    params,
+    symbol,
+    acc_threshold,
+    nda_threshold,
+    deltadelta_threshold,
+    indicator_rows=None,
+):
+    final_capital, report = Backtesting.simulate_trading_detailed(
+        historical_prices,
+        acc_threshold,
+        nda_threshold,
+        deltadelta_threshold,
+        {
+            "start_capital": config.start_capital,
+            "trade_amount": config.trade_amount,
+            "take_profit": config.take_profit,
+            "stop_loss": config.stop_loss,
+            "fee_percentage": config.fee,
+        },
+        indicator_rows=indicator_rows,
+    )
+    return {
+        "symbol": symbol,
+        "thresholds": {
+            "acc_threshold": acc_threshold,
+            "nda_threshold": nda_threshold,
+            "deltadelta_threshold": deltadelta_threshold,
+        },
+        "final_capital": final_capital,
+        "report": report,
+        "params": params,
+    }
+
 
 @shared_task(bind=True)
-def simulate_candidate(self, config_id, params, symbol, task_id, acc_threshold, nda_threshold, deltadelta_threshold):
-    """Führt die Backtest-Simulation für einen Schwellenwert-Kandidaten durch."""
+def simulate_candidate(
+    self,
+    config_id,
+    params,
+    symbol,
+    task_id,
+    acc_threshold,
+    nda_threshold,
+    deltadelta_threshold,
+):
+    """Kompatibler Einzelkandidaten-Task für externe Celery-Aufrufer."""
+    del self, task_id
     try:
         config = Configuration.objects.get(id=config_id)
-        # Optimierung: Preise einmalig abrufen
-        historical_prices = [log.price for log in DataLog.objects.filter(
-            configuration=config, symbol=symbol).order_by('timestamp')]
-        if not historical_prices:
-            return {'symbol': symbol, 'error': f"Keine historischen Preise für {symbol} gefunden."}
-
-        prices_decimal = [Decimal(str(p)) for p in historical_prices]
-        simulation_params = {
-            'start_capital': config.start_capital,
-            'trade_amount': config.trade_amount,
-            'take_profit': config.take_profit,
-            'fee_percentage': config.fee  # Konsistenz: fee in Prozent
-        }
-
-        final_capital, report = Backtesting.simulate_trading_detailed(
-            prices_decimal, acc_threshold, nda_threshold, deltadelta_threshold, simulation_params
+        prices = _historical_prices(config.id, symbol)
+        if len(prices) < 3:
+            return {"symbol": symbol, "error": "Mindestens drei Preispunkte benötigt."}
+        return _simulate_candidate(
+            config,
+            prices,
+            params,
+            symbol,
+            acc_threshold,
+            nda_threshold,
+            deltadelta_threshold,
         )
+    except Exception as exc:
+        logger.exception("Simulation für %s fehlgeschlagen", symbol)
+        return {"symbol": symbol, "error": str(exc)}
 
-        return {
-            'symbol': symbol,
-            'thresholds': {
-                'acc_threshold': acc_threshold,
-                'nda_threshold': nda_threshold,
-                'deltadelta_threshold': deltadelta_threshold
-            },
-            'final_capital': final_capital,
-            'report': report,
-            'params': params
+
+def _collect_results(results, task):
+    symbol_results = {}
+    errors = []
+    for result in results:
+        if not isinstance(result, dict) or "final_capital" not in result:
+            if isinstance(result, dict) and result.get("error"):
+                errors.append({"symbol": result.get("symbol"), "error": result["error"]})
+            continue
+        symbol_results.setdefault(result["symbol"], []).append(result)
+
+    processed = {}
+    for symbol, candidates in symbol_results.items():
+        best = max(candidates, key=lambda item: Decimal(str(item["final_capital"])))
+        thresholds = best["thresholds"]
+        processed[symbol] = {
+            "best_capital": decimal_to_str(best["final_capital"]),
+            "best_thresholds": decimal_to_str(thresholds),
+            "report": decimal_to_str(best["report"]),
+            "optimized_thresholds_str": ", ".join(
+                f"{key.removesuffix('_threshold')}: {value}" for key, value in thresholds.items()
+            ),
         }
-    except Exception as e:
-        logger.error(f"Fehler bei Simulation für {symbol} (Task {task_id}): {e}", exc_info=True)
-        return {'symbol': symbol, 'error': f"Simulationsfehler für {symbol}: {e}"}
-        
+
+    if not processed:
+        raise ValueError("Keine verwertbaren Backtest-Ergebnisse: " + str(errors[:5]))
+
+    total_profit = sum(
+        Decimal(result["best_capital"]) - task.configuration.start_capital
+        for result in processed.values()
+    )
+    trades_per_symbol = {
+        symbol: result["report"]["num_sells"] for symbol, result in processed.items()
+    }
+    profit_per_symbol = {
+        symbol: str(Decimal(result["best_capital"]) - task.configuration.start_capital)
+        for symbol, result in processed.items()
+    }
+    global_results = {
+        "total_profit": str(total_profit),
+        "total_trades": sum(trades_per_symbol.values()),
+        "trades_per_symbol": trades_per_symbol,
+        "profit_per_symbol": profit_per_symbol,
+    }
+    return {
+        "symbol_results": processed,
+        "global_results": global_results,
+        "errors": errors,
+    }
+
+
 @shared_task
 def collect_results(results, task_id):
-    """Sammelt Simulationergebnisse und findet beste Schwellenwerte pro Symbol."""
-    task = BacktestTask.objects.get(id=task_id)
-    symbol_results = {}
-
-    if not results or not isinstance(results, list):
-        logger.error(f"Ungültige Ergebnisse für Task {task_id}: {results}")
-        task.status = 'failed'
-        task.result = {'error': 'Ungültige oder leere Ergebnisse'}
-        task.save()
-        return
-
-    # Ergebnisse pro Symbol sammeln
-    for result in results:
-        if isinstance(result, dict) and 'symbol' in result and 'final_capital' in result:
-            symbol = result['symbol']
-            if symbol not in symbol_results:
-                symbol_results[symbol] = []
-            symbol_results[symbol].append(result)
-
-    # Beste Schwellenwerte pro Symbol ermitteln
-    processed_symbol_results = {}
-    for symbol, sym_results in symbol_results.items():
-        best_capital = Decimal('-Infinity')
-        best_thresholds = None
-        best_report = None
-        for result in sym_results:
-            if result['final_capital'] > best_capital:
-                best_capital = result['final_capital']
-                best_thresholds = result['thresholds']
-                best_report = result['report']
-        processed_symbol_results[symbol] = {
-            'best_capital': decimal_to_str(best_capital),
-            'best_thresholds': decimal_to_str(best_thresholds),
-            'report': decimal_to_str(best_report),
-            'optimized_thresholds_str': ', '.join([f"{k.split('_')[0]}: {v}" for k, v in best_thresholds.items()]) if best_thresholds else "Keine optimierten Schwellenwerte"
-        }
-
-    task.result = {'symbol_results': processed_symbol_results}
-    task.status = 'completed'
+    task = BacktestTask.objects.select_related("configuration").get(id=task_id)
+    try:
+        task.result = _collect_results(results, task)
+        task.status = "completed"
+        task.progress = 100
+    except Exception as exc:
+        task.result = {"error": str(exc)}
+        task.status = "failed"
+        logger.exception("Ergebnissammlung für Backtest %s fehlgeschlagen", task_id)
     task.save()
     return task.result
 
-@shared_task
-def run_backtest(config_id, params, symbols, task_id):
-    """Startet den Backtest-Prozess."""
+
+@shared_task(bind=True)
+def run_backtest(self, config_id, params, symbols, task_id):
+    """Führt einen Backtest speicherschonend und mit kooperativer Pause aus."""
+    started_at = timezone.now()
     try:
-        task = BacktestTask.objects.get(id=task_id)
+        task = BacktestTask.objects.select_related("configuration").get(id=task_id)
+        config = task.configuration
+        task.celery_task_id = self.request.id or task.celery_task_id
+        task.status = "running"
+        task.progress = 0
+        task.save(update_fields=["celery_task_id", "status", "progress"])
+
+        ranges = (
+            _parameter_values(params["acc_from"], params["acc_to"], params["acc_steps"]),
+            _parameter_values(params["nda_from"], params["nda_to"], params["nda_steps"]),
+            _parameter_values(
+                params["deltadelta_from"],
+                params["deltadelta_to"],
+                params["deltadelta_steps"],
+            ),
+        )
+        symbols = [symbol.strip() for symbol in symbols if symbol.strip()]
+        total = len(symbols)
+        for values in ranges:
+            total *= len(values)
+        if total <= 0 or total > _MAX_TOTAL_COMBINATIONS:
+            raise ValueError(
+                f"Ungültige Anzahl Kombinationen ({total}); maximal {_MAX_TOTAL_COMBINATIONS}."
+            )
+
+        prices_by_symbol = {symbol: _historical_prices(config_id, symbol) for symbol in symbols}
+        best_results = {}
+        errors = []
+        completed = 0
+        last_progress = -1
+        combinations_per_symbol = len(ranges[0]) * len(ranges[1]) * len(ranges[2])
+        for symbol in symbols:
+            prices = prices_by_symbol[symbol]
+            if len(prices) < 3:
+                errors.append({"symbol": symbol, "error": "Mindestens drei Preispunkte benötigt."})
+                completed += combinations_per_symbol
+                continue
+            indicator_rows = [None, None] + [
+                Backtesting.calculate_indicators(prices, index) for index in range(2, len(prices))
+            ]
+            for acc_threshold in ranges[0]:
+                for nda_threshold in ranges[1]:
+                    for deltadelta_threshold in ranges[2]:
+                        if completed % 10 == 0:
+                            while True:
+                                state = BacktestTask.objects.only("status").get(id=task_id).status
+                                if state == "paused":
+                                    time.sleep(0.25)
+                                    continue
+                                if state == "cancelled":
+                                    return {"status": "cancelled"}
+                                break
+                        candidate = _simulate_candidate(
+                            config,
+                            prices,
+                            params,
+                            symbol,
+                            acc_threshold,
+                            nda_threshold,
+                            deltadelta_threshold,
+                            indicator_rows,
+                        )
+                        previous_best = best_results.get(symbol)
+                        if (
+                            previous_best is None
+                            or candidate["final_capital"] > previous_best["final_capital"]
+                        ):
+                            best_results[symbol] = candidate
+                        completed += 1
+                        progress = min(99, int(completed / total * 100))
+                        if progress != last_progress:
+                            task.update_progress(progress)
+                            last_progress = progress
+
+        task.refresh_from_db(fields=["status"])
+        if task.status == "cancelled":
+            return {"status": "cancelled"}
+        result = _collect_results([*best_results.values(), *errors], task)
+        ended_at = timezone.now()
+        result.update(
+            {
+                "start_time": started_at.isoformat(),
+                "end_time": ended_at.isoformat(),
+                "duration": str(ended_at - started_at),
+            }
+        )
+        task.result = result
+        task.status = "completed"
+        task.progress = 100
+        task.save()
+        task.update_progress(100)
+        return result
     except BacktestTask.DoesNotExist:
-        logger.error(f"Task {task_id} nicht gefunden.")
-        return {'error': f"Task {task_id} nicht gefunden"}
-    if not task:
-        logger.error(f"Task {task_id} nicht gefunden.")
-        return {'error': f"Task {task_id} nicht gefunden"}
+        logger.error("Backtest %s existiert nicht", task_id)
+        return {"error": "Backtest nicht gefunden"}
+    except Exception as exc:
+        logger.exception("Backtest %s fehlgeschlagen", task_id)
+        BacktestTask.objects.filter(id=task_id).update(
+            status="failed",
+            result={"error": str(exc)},
+            completed_at=timezone.now(),
+        )
+        raise
 
-    task.status = 'running'
-    task.save()
-
-    acc_range = np.arange(params['acc_from'], params['acc_to'] + params['acc_steps']/2, params['acc_steps'])
-    nda_range = np.arange(params['nda_from'], params['nda_to'] + params['nda_steps']/2, params['nda_steps'])
-    deltadelta_range = np.arange(params['deltadelta_from'], params['deltadelta_to'] + params['deltadelta_steps']/2, params['deltadelta_steps'])
-
-    tasks = []
-    total_combinations = len(acc_range) * len(nda_range) * len(deltadelta_range) * len(symbols)
-    combination_count = 0
-
-    for symbol in symbols:
-        for acc_threshold in acc_range:
-            for nda_threshold in nda_range:
-                for deltadelta_threshold in deltadelta_range:
-                    combination_count += 1
-                    if combination_count % 100 == 0:  # Effizientere Aktualisierung
-                        progress_percentage = (combination_count / total_combinations) * 100
-                        task.update_progress(int(progress_percentage))
-                    tasks.append(simulate_candidate.s(config_id, params, symbol, task_id, float(acc_threshold), float(nda_threshold), float(deltadelta_threshold)))
-
-    callback = collect_results.s(task_id=task_id)
-    final_chord = chord(tasks)(callback)
-    return final_chord
 
 @shared_task
 def schedule_backtests():
+    """Beansprucht und startet alle fälligen geplanten Backtests genau einmal."""
     now = timezone.now()
-    logger.info(f"schedule_backtests gestartet. Aktuelle Zeit: {now}")
-    scheduled_tasks = BacktestTask.objects.filter(
-        status='scheduled',
-        scheduled_start_time__lte=now
+    due_ids = list(
+        BacktestTask.objects.filter(
+            status="scheduled",
+            scheduled_start_time__lte=now,
+        ).values_list("id", flat=True)
     )
-    logger.info(f"Anzahl geplanter Tasks gefunden: {scheduled_tasks.count()}")
-
-    for task in scheduled_tasks:
-        logger.info(f"Verarbeite geplanten Task ID: {task.id}, Startzeit: {task.scheduled_start_time}")
-        symbols_str = task.symbol
-        symbols = [symbol.strip() for symbol in symbols_str.split(',')]
-        params = task.parameters
-        task_id = task.id
-
-        logger.info(f"Starte Task {task_id} mit run_backtest. Symbole: {symbols}, Parameter: {params}")
-        celery_task = dispatch_task(run_backtest, task.configuration_id, params, symbols, task_id)
-        logger.info(f"run_backtest dispatcht. Task ID: {celery_task.id}") # Log der Task ID
-        task.celery_task_id = celery_task.id
-        task.status = 'pending'
-        task.is_scheduled = False
-        task.scheduled_start_time = None
-        task.save()
-        logger.info(f"Task {task_id} aktualisiert. Status: pending, Celery Task ID: {task.celery_task_id}")
-    logger.info("schedule_backtests beendet.")
+    dispatched = 0
+    for task_id in due_ids:
+        claimed = BacktestTask.objects.filter(id=task_id, status="scheduled").update(
+            status="pending",
+            is_scheduled=False,
+            scheduled_start_time=None,
+        )
+        if not claimed:
+            continue
+        task = BacktestTask.objects.get(id=task_id)
+        symbols = [symbol.strip() for symbol in task.symbol.split(",") if symbol.strip()]
+        celery_task = dispatch_task(
+            run_backtest,
+            task.configuration_id,
+            task.parameters,
+            symbols,
+            task.id,
+        )
+        BacktestTask.objects.filter(id=task.id).update(celery_task_id=celery_task.id)
+        dispatched += 1
+    logger.info("%s geplante Backtests gestartet", dispatched)
+    return {"dispatched": dispatched, "checked_at": datetime.now(datetime_timezone.utc).isoformat()}

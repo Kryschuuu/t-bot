@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+*.sqlite3
+*.log
+.env*
+.pytest_cache
+.ruff_cache
+staticfiles
+*.patch
+*.zip
+DEBUGGING_PROTOKOLL*.md
+DEPLOYMENT_PROTOKOLL.md
+tbot_updated_files

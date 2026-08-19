@@ -1,6 +1,6 @@
 # trading_bot_project/settings.py
-import os
 import logging
+import os
 from pathlib import Path
 
 import dj_database_url
@@ -18,6 +18,14 @@ def env_bool(name, default=False):
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_int(name, default, minimum=1):
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        logger.warning("Ungültiger Integerwert für %s; verwende %s", name, default)
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +105,9 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", True)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7  # 7 Tage (konservativ starten)
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = False
+    SECURE_HSTS_PRELOAD = True
     SECURE_REFERRER_POLICY = "same-origin"
 else:
     SECURE_SSL_REDIRECT = False
@@ -118,7 +126,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "django_extensions",
     "channels",
     "trading.apps.TradingConfig",
 ]
@@ -220,6 +227,8 @@ else:
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
 LANGUAGE_CODE = "de-de"
@@ -238,7 +247,11 @@ STORAGES = {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": (
+            "django.contrib.staticfiles.storage.StaticFilesStorage"
+            if DEBUG
+            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        ),
     },
 }
 
@@ -298,12 +311,18 @@ LOGGING = {
 # Steuert, ob TradingBots fuer aktive Konfigurationen beim Prozessstart
 # automatisch gestartet werden sollen (siehe trading/apps.py).
 AUTOSTART_BOTS = env_bool("AUTOSTART_BOTS", True)
+MAX_DATA_LOGS_PER_SYMBOL = env_int("MAX_DATA_LOGS_PER_SYMBOL", 20_000, minimum=1_000)
+DATA_LOG_CLEANUP_EVERY = env_int("DATA_LOG_CLEANUP_EVERY", 500, minimum=10)
 
 # ---------------------------------------------------------------------------
 # Passphrase-Gate (Landingpage vor Registrierung/Login)
 # ---------------------------------------------------------------------------
-# WICHTIG: Der Default-Wert ist NUR zum Testen gedacht und oeffentlich in
-# diesem Repo sichtbar. Fuer den echten Betrieb PASSPHRASE unbedingt als
-# eigene Environment-Variable auf Render setzen (Dashboard -> Environment)!
-PASSPHRASE = os.environ.get("PASSPHRASE", "n7kQ2vX9mP5wL8eRt3bF")
+PASSPHRASE = os.environ.get("PASSPHRASE")
+if not PASSPHRASE:
+    if env_bool("RENDER", False):
+        raise RuntimeError(
+            "PASSPHRASE environment variable is required on Render. "
+            "Generate it in the service environment settings."
+        )
+    PASSPHRASE = "local-development-only"
 PASSPHRASE_GATE_ENABLED = env_bool("PASSPHRASE_GATE_ENABLED", True)
