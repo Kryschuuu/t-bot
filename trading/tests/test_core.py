@@ -7,6 +7,7 @@ from django.urls import reverse
 
 from trading.backtesting import Backtesting
 from trading.forms import BacktestForm, ConfigurationForm
+from trading.market_data import BinancePublicMarketData, BitMartPublicMarketData
 from trading.models import BacktestTask, Configuration, DataLog, TradingLog
 from trading.tasks import run_backtest
 from trading.trading_bot import TradingBot
@@ -88,6 +89,36 @@ class FormTests(TestCase):
         form = BacktestForm(data)
         self.assertFalse(form.is_valid())
         self.assertIn("acc_steps", form.errors)
+
+
+class MarketDataAdapterTests(TestCase):
+    def test_binance_uses_one_batch_response_for_all_symbols(self):
+        provider = BinancePublicMarketData("spot")
+        calls = []
+
+        def fake_json(url, **kwargs):
+            calls.append((url, kwargs))
+            return [
+                {"symbol": "BTCUSDT", "price": "123.45"},
+                {"symbol": "ETHUSDT", "price": "45.67"},
+            ]
+
+        provider._json = fake_json
+        result = provider.fetch_tickers(["BTC/USDT", "ETH/USDT"])
+        provider.close()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["BTC/USDT"]["last"], "123.45")
+        self.assertIn("symbols", calls[0][1]["params"])
+
+    def test_bitmart_adapter_handles_current_v3_response(self):
+        provider = BitMartPublicMarketData("spot")
+        provider._json = lambda *args, **kwargs: {
+            "code": 1000,
+            "data": {"symbol": "BTC_USDT", "last": "321.00"},
+        }
+        result = provider.fetch_tickers(["BTC/USDT"])
+        provider.close()
+        self.assertEqual(result["BTC/USDT"]["last"], "321.00")
 
 
 @override_settings(PASSPHRASE_GATE_ENABLED=False, AUTOSTART_BOTS=False)

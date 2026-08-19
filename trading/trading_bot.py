@@ -21,6 +21,7 @@ from django.db import (
 )
 from django.db.utils import InterfaceError
 
+from .market_data import BinancePublicMarketData, BitMartPublicMarketData
 from .models import Configuration, DataLog, ErrorLog, TradingLog
 
 logger = logging.getLogger("trading")
@@ -170,13 +171,20 @@ class TradingBot(threading.Thread):
         self.started_at = time.time()
         self._data_log_counts = {}
         self._persisted_errors = {}
+        self._rate_limit_delay = 0
         self.start_time = time.time() + max(0, config.countdown) * 60
         self.start_countdown_over = config.countdown <= 0
         self._sync_symbols()
         self._restore_state()
 
     def _setup_exchange(self):
-        exchange_class = getattr(ccxt, self.config.exchange, None)
+        exchange_id = self.config.exchange.strip().lower()
+        if exchange_id == "binance":
+            return BinancePublicMarketData(self.config.market)
+        if exchange_id == "bitmart":
+            return BitMartPublicMarketData(self.config.market)
+
+        exchange_class = getattr(ccxt, exchange_id, None)
         if exchange_class is None:
             raise ValueError(f"Unbekannte Exchange: {self.config.exchange}")
         default_type = "swap" if self.config.market == "futures" else "spot"
@@ -257,22 +265,57 @@ class TradingBot(threading.Thread):
             await db_log_error(self.config_id, source, text)
             self._persisted_errors[key] = (now, text)
 
+    async def _sleep(self, seconds):
+        remaining = max(0, seconds)
+        while remaining > 0 and self.running:
+            step = min(1, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+
     async def main_loop(self):
         while self.running:
             try:
                 self.config = await db_get_config(self.config_id)
                 self._sync_symbols()
+                try:
+                    tickers = await self.fetch_tickers(self.symbols)
+                except Exception as exc:
+                    text = str(exc)
+                    rate_limited = "418" in text or "429" in text or "rate" in text.lower()
+                    if rate_limited:
+                        self._rate_limit_delay = min(
+                            15 * 60,
+                            max(30, self._rate_limit_delay * 2),
+                        )
+                    else:
+                        self._rate_limit_delay = 2
+                    self.last_error = f"Marktdaten: {text}"
+                    self.last_error_at = time.time()
+                    logger.error(
+                        "Marktdatenfehler für Bot %s; neuer Versuch in %ss: %s",
+                        self.config_id,
+                        self._rate_limit_delay,
+                        text,
+                    )
+                    await self._persist_error(
+                        "market_data",
+                        "trading_bot.fetch_tickers",
+                        text,
+                    )
+                    await self._sleep(self._rate_limit_delay)
+                    continue
+
                 any_success = False
-                # Das synchrone CCXT-Objekt ist nicht thread-sicher. Daher werden
-                # Symbole bewusst nacheinander statt parallel abgefragt.
                 for symbol in self.symbols:
-                    if not self.running:
-                        break
+                    ticker = tickers.get(symbol)
                     try:
-                        await self.process_symbol(symbol)
+                        if not ticker:
+                            raise ValueError(f"Exchange lieferte keinen Ticker für {symbol}")
+                        self.store_price(symbol, ticker)
+                        await self.calculate_and_store(symbol)
                         any_success = True
                     except Exception as exc:
-                        logger.error("%s Fehler: %s", symbol, exc)
+                        logger.error("%s Verarbeitungsfehler: %s", symbol, exc)
                         self.last_error = f"{symbol}: {exc}"
                         self.last_error_at = time.time()
                         await self._persist_error(
@@ -282,12 +325,8 @@ class TradingBot(threading.Thread):
                         )
                 if any_success:
                     self.last_success_at = time.time()
-
-                remaining = max(1, self.config.time_interval)
-                while remaining > 0 and self.running:
-                    step = min(1, remaining)
-                    await asyncio.sleep(step)
-                    remaining -= step
+                    self._rate_limit_delay = 0
+                await self._sleep(max(1, self.config.time_interval))
             except ObjectDoesNotExist:
                 logger.info("Konfiguration %s wurde gelöscht; Bot stoppt", self.config_id)
                 self.running = False
@@ -296,15 +335,21 @@ class TradingBot(threading.Thread):
                 self.last_error = f"main_loop: {exc}"
                 self.last_error_at = time.time()
                 await self._persist_error("main_loop", "trading_bot.main_loop", exc)
-                await asyncio.sleep(2)
+                await self._sleep(2)
 
-    async def process_symbol(self, symbol):
-        await self.fetch_price(symbol)
-        await self.calculate_and_store(symbol)
+    async def fetch_tickers(self, symbols):
+        fetch_many = getattr(self.exchange, "fetch_tickers", None)
+        if fetch_many:
+            future = self.loop.run_in_executor(None, fetch_many, symbols)
+            return await asyncio.wait_for(future, timeout=25)
 
-    async def fetch_price(self, symbol):
-        future = self.loop.run_in_executor(None, self.exchange.fetch_ticker, symbol)
-        ticker = await asyncio.wait_for(future, timeout=20)
+        tickers = {}
+        for symbol in symbols:
+            future = self.loop.run_in_executor(None, self.exchange.fetch_ticker, symbol)
+            tickers[symbol] = await asyncio.wait_for(future, timeout=20)
+        return tickers
+
+    def store_price(self, symbol, ticker):
         raw_price = ticker.get("last") or ticker.get("close")
         if raw_price is None:
             raise ValueError("Exchange lieferte keinen letzten Preis")
