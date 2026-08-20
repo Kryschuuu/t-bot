@@ -57,7 +57,8 @@
 </head>
 <body>
     <h1>Trading Analyse Report</h1>
-    <h2>Konfiguration: {{ config.id }}</h2>
+    <h2>{{ config.user.username }} · {{ config.get_exchange_display }} · Konfiguration {{ config.id }}</h2>
+    <p style="text-align:center;">Erstellt: {{ generated_at|date:"d.m.Y H:i:s T" }}</p>
     <div class="details">
       <p><strong>Exchange:</strong> {{ config.exchange }}</p>
       <p><strong>Markt:</strong> {{ config.market }}</p>

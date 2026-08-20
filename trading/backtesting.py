@@ -19,11 +19,11 @@ class Backtesting:
 
         current_da = current_price - previous_price
         current_nda = (
-            (current_da / current_price * Decimal(100)).quantize(
+            (current_da / previous_price * Decimal(100)).quantize(
                 _EIGHT_PLACES,
                 rounding=ROUND_HALF_UP,
             )
-            if current_price
+            if previous_price
             else Decimal(0)
         )
         previous_da = previous_price - older_price

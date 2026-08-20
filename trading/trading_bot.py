@@ -24,6 +24,8 @@ from django.db.utils import InterfaceError
 from .market_data import (
     BinancePublicMarketData,
     BitMartPublicMarketData,
+    BitunixPublicMarketData,
+    MarketDataConnectionError,
     RateLimitError,
     SymbolValidationError,
     WebSocketReconnectError,
@@ -206,6 +208,8 @@ class TradingBot(threading.Thread):
         self._data_log_counts = {}
         self._persisted_errors = {}
         self._rate_limit_delay = 0
+        self.liquidating = False
+        self._market_data_lock = None
         self.start_time = time.time() + max(0, config.countdown) * 60
         self.start_countdown_over = config.countdown <= 0
         self._sync_symbols()
@@ -217,6 +221,8 @@ class TradingBot(threading.Thread):
             return BinancePublicMarketData(self.config.market)
         if exchange_id == "bitmart":
             return BitMartPublicMarketData(self.config.market)
+        if exchange_id == "bitunix":
+            return BitunixPublicMarketData(self.config.market)
 
         exchange_class = getattr(ccxt, exchange_id, None)
         if exchange_class is None:
@@ -348,6 +354,11 @@ class TradingBot(threading.Thread):
                                 15 * 60,
                                 max(30, self._rate_limit_delay * 2),
                             )
+                    elif isinstance(exc, MarketDataConnectionError):
+                        self._rate_limit_delay = min(
+                            5 * 60,
+                            max(5, self._rate_limit_delay * 2),
+                        )
                     else:
                         self._rate_limit_delay = 2
                     self.last_error = f"Marktdaten: {text}"
@@ -426,20 +437,25 @@ class TradingBot(threading.Thread):
                 await self._sleep(2)
 
     async def fetch_tickers(self, symbols):
-        fetch_many_async = getattr(self.exchange, "fetch_tickers_async", None)
-        if fetch_many_async:
-            return await asyncio.wait_for(fetch_many_async(symbols), timeout=90)
+        # Kill-Switch und Hauptzyklus dürfen dasselbe Exchange-/WebSocket-
+        # Objekt niemals gleichzeitig lesen.
+        if self._market_data_lock is None:
+            self._market_data_lock = asyncio.Lock()
+        async with self._market_data_lock:
+            fetch_many_async = getattr(self.exchange, "fetch_tickers_async", None)
+            if fetch_many_async:
+                return await asyncio.wait_for(fetch_many_async(symbols), timeout=90)
 
-        fetch_many = getattr(self.exchange, "fetch_tickers", None)
-        if fetch_many:
-            future = self.loop.run_in_executor(None, fetch_many, symbols)
-            return await asyncio.wait_for(future, timeout=25)
+            fetch_many = getattr(self.exchange, "fetch_tickers", None)
+            if fetch_many:
+                future = self.loop.run_in_executor(None, fetch_many, symbols)
+                return await asyncio.wait_for(future, timeout=25)
 
-        tickers = {}
-        for symbol in symbols:
-            future = self.loop.run_in_executor(None, self.exchange.fetch_ticker, symbol)
-            tickers[symbol] = await asyncio.wait_for(future, timeout=20)
-        return tickers
+            tickers = {}
+            for symbol in symbols:
+                future = self.loop.run_in_executor(None, self.exchange.fetch_ticker, symbol)
+                tickers[symbol] = await asyncio.wait_for(future, timeout=20)
+            return tickers
 
     def store_price(self, symbol, ticker):
         raw_price = ticker.get("last") or ticker.get("close")
@@ -509,6 +525,8 @@ class TradingBot(threading.Thread):
         return self.config.start_capital + self.realized_pl - allocated
 
     async def check_trading(self, symbol, price, nda, deltadelta, acceleration):
+        if self.liquidating:
+            return
         if not self.start_countdown_over:
             if time.time() >= self.start_time:
                 self.start_countdown_over = True
@@ -601,6 +619,37 @@ class TradingBot(threading.Thread):
             raise RuntimeError("Trade konnte nicht gespeichert werden")
         if side == "sell" and self.config.countdown_reset_indicators:
             self.price_buffer[symbol] = []
+
+    async def liquidate_all_positions(self):
+        """Schließt alle Paper-Positionen mit frisch abgerufenen Marktpreisen."""
+        if not self.positions:
+            return {"sold": [], "errors": {}}
+        self.liquidating = True
+        sold = []
+        errors = {}
+        try:
+            symbols = list(self.positions)
+            tickers = await self.fetch_tickers(symbols)
+            for symbol in symbols:
+                try:
+                    ticker = tickers.get(symbol)
+                    if not ticker:
+                        raise ValueError(f"Kein aktueller Marktpreis für {symbol}")
+                    self.store_price(symbol, ticker)
+                    await self.execute_trade(symbol, "sell")
+                    sold.append(symbol)
+                except Exception as exc:
+                    errors[symbol] = str(exc)
+                    await self._persist_error(
+                        f"kill-switch:{symbol}",
+                        "trading_bot.kill_switch",
+                        exc,
+                        severity="critical",
+                        details={"symbol": symbol, "exchange": self.config.exchange},
+                    )
+            return {"sold": sold, "errors": errors}
+        finally:
+            self.liquidating = False
 
     async def manual_sell(self, symbol):
         if symbol not in self.positions:
@@ -701,6 +750,19 @@ class TradingBotManager:
             raise ValueError("Bot läuft nicht; manueller Verkauf ist nicht möglich")
         future = asyncio.run_coroutine_threadsafe(bot.manual_sell(symbol), bot.loop)
         return future.result(timeout=10)
+
+    def open_symbols(self, config_id):
+        with self._lock:
+            bot = self.bots.get(config_id)
+            return sorted(bot.positions) if bot and bot.is_alive() else []
+
+    def kill_switch(self, config_id):
+        with self._lock:
+            bot = self.bots.get(config_id)
+        if not bot or not bot.is_alive() or bot.loop is None:
+            raise ValueError("Bot läuft nicht; der Kill-Switch kann keine Preise abrufen")
+        future = asyncio.run_coroutine_threadsafe(bot.liquidate_all_positions(), bot.loop)
+        return future.result(timeout=120)
 
     def status(self, config_id):
         with self._lock:

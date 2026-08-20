@@ -1,18 +1,18 @@
 {% extends "trading/base.html" %}
+{% block title %}Neue Konfiguration · Trading Bot{% endblock %}
 {% block content %}
-
-<div class="container mt-4">
-    <h2>Neue Konfiguration</h2>
-    <form method="post">
-        {% csrf_token %}
-        <table class="table table-bordered table-hover">
-            <tbody>
-                {{ form.as_table }}                
-            </tbody>
-        </table>
-        <button type="submit" class="btn btn-primary">Speichern</button>
+<div class="card">
+  <div class="card-header"><h1 class="h3 mb-0">Neue Konfiguration</h1></div>
+  <div class="card-body">
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% include "trading/_configuration_fields.html" %}
+      <div class="d-flex gap-2 mt-4">
+        <button type="submit" class="btn btn-primary">Speichern und prüfen</button>
+        <a href="{% url 'dashboard' %}" class="btn btn-secondary">Abbrechen</a>
+      </div>
     </form>
-    <a href="{% url 'dashboard' %}" class="btn btn-secondary mt-3">Zum Dashboard</a>
+  </div>
 </div>
-
 {% endblock %}
+{% block extra_js %}{% include "trading/_symbol_autocomplete_js.html" %}{% endblock %}

@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import csv
 import logging
 import math
+import re
 import threading
 from collections import Counter, defaultdict
 from decimal import Decimal
@@ -15,7 +17,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.db.models import Sum
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -33,6 +35,7 @@ from .forms import (
 )
 from .market_data import MarketDataError, SymbolValidationError, validate_exchange_symbols
 from .models import BacktestTask, Configuration, ErrorLog
+from .symbols import get_available_symbols
 from .tasks import dispatch_task, local_task_is_active, run_backtest
 from .trading_bot import bot_manager
 
@@ -304,19 +307,22 @@ def dashboard_view(request):
         messages.success(request, "Strategieparameter wurden gespeichert.")
         return _redirect_dashboard(config.id)
 
-    logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    metric_logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    display_logs = list(config.logs.all().order_by("-timestamp", "-id")[:100])
     total_profit = _realized_profit(config)
     current_capital = config.start_capital + total_profit
     context = {
         "config": config,
         "form": form,
-        "logs": logs[-500:],
+        "logs": display_logs,
         "current_capital": current_capital,
         "tank": total_profit,
-        "buy_orders": sum(log.action == "buy" for log in logs),
-        "sell_orders": sum(log.action == "sell" for log in logs),
-        "profitable_sells": sum(log.action == "sell" and log.pl_nominal > 0 for log in logs),
-        "unprofitable_sells": sum(log.action == "sell" and log.pl_nominal <= 0 for log in logs),
+        "buy_orders": sum(log.action == "buy" for log in metric_logs),
+        "sell_orders": sum(log.action == "sell" for log in metric_logs),
+        "profitable_sells": sum(log.action == "sell" and log.pl_nominal > 0 for log in metric_logs),
+        "unprofitable_sells": sum(
+            log.action == "sell" and log.pl_nominal <= 0 for log in metric_logs
+        ),
         "symbols": _symbols(config),
         "all_configs": Configuration.objects.filter(user=request.user).order_by("-id"),
     }
@@ -347,6 +353,32 @@ def _validated_start_time(request):
     if parsed and timezone.is_naive(parsed):
         parsed = timezone.make_aware(parsed)
     return parsed
+
+
+@login_required
+@require_GET
+def symbol_suggestions_api(request):
+    exchange = request.GET.get("exchange", "").strip().lower()
+    market = request.GET.get("market", "").strip().lower()
+    query = request.GET.get("q", "").strip().upper()
+    valid_exchanges = dict(Configuration.EXCHANGE_CHOICES)
+    valid_markets = dict(Configuration.MARKET_CHOICES)
+    if exchange not in valid_exchanges or market not in valid_markets:
+        return JsonResponse({"error": "Ungültige Exchange oder Marktart"}, status=400)
+    try:
+        symbols = get_available_symbols(exchange, market)
+    except MarketDataError as exc:
+        return JsonResponse({"error": str(exc), "suggestions": []}, status=503)
+    suggestions = [symbol for symbol in symbols if not query or query in symbol][:20]
+    return JsonResponse(
+        {
+            "exchange": exchange,
+            "market": market,
+            "query": query,
+            "suggestions": suggestions,
+            "authoritative_on_submit": True,
+        }
+    )
 
 
 @login_required
@@ -511,29 +543,48 @@ def bot_status_api(request):
 @require_GET
 def logs_api(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
+    paginator = Paginator(config.logs.all().order_by("-timestamp", "-id"), 100)
+    page = paginator.get_page(request.GET.get("page", 1))
+    open_symbols = set(bot_manager.open_symbols(config.id))
+    if not open_symbols:
+        for symbol in _symbols(config):
+            latest = config.logs.filter(symbol=symbol).order_by("-timestamp", "-id").first()
+            if latest and latest.action == "buy":
+                open_symbols.add(symbol)
+
+    results = [
+        {
+            "id": log.id,
+            "timestamp": log.timestamp.isoformat(),
+            "date": timezone.localtime(log.timestamp).date().isoformat(),
+            "time": timezone.localtime(log.timestamp).strftime("%H:%M:%S"),
+            "symbol": log.symbol,
+            "action": log.action,
+            "price": float(log.price),
+            "fee_amount": float(log.fee_amount),
+            "amount": float(log.amount),
+            "order_id": log.order_id,
+            "pl_nominal": float(log.pl_nominal),
+            "pl_relative": float(log.pl_relative),
+            "total_pl": float(log.total_pl),
+            "current_capital": float(log.current_capital),
+            "tank": float(log.tank),
+        }
+        for log in page.object_list
+    ]
     return JsonResponse(
-        [
-            {
-                "id": log.id,
-                "timestamp": log.timestamp.isoformat(),
-                "date": timezone.localtime(log.timestamp).date().isoformat(),
-                "time": timezone.localtime(log.timestamp).strftime("%H:%M:%S"),
-                "symbol": log.symbol,
-                "action": log.action,
-                "price": float(log.price),
-                "fee_amount": float(log.fee_amount),
-                "amount": float(log.amount),
-                "order_id": log.order_id,
-                "pl_nominal": float(log.pl_nominal),
-                "pl_relative": float(log.pl_relative),
-                "total_pl": float(log.total_pl),
-                "current_capital": float(log.current_capital),
-                "tank": float(log.tank),
-            }
-            for log in logs
-        ],
-        safe=False,
+        {
+            "results": results,
+            "open_symbols": sorted(open_symbols),
+            "pagination": {
+                "page": page.number,
+                "page_size": 100,
+                "pages": paginator.num_pages,
+                "count": paginator.count,
+                "has_previous": page.has_previous(),
+                "has_next": page.has_next(),
+            },
+        }
     )
 
 
@@ -563,6 +614,37 @@ def manual_sell_view(request, config_id):
             {"status": "error", "message": "Verkauf fehlgeschlagen."},
             status=500,
         )
+
+
+@login_required
+@require_POST
+def kill_switch_view(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    if request.POST.get("confirm1") != "LIQUIDATE" or request.POST.get("confirm2") != "LIQUIDATE":
+        return JsonResponse(
+            {"status": "error", "message": "Doppelte Bestätigung fehlt."},
+            status=400,
+        )
+    try:
+        result = bot_manager.kill_switch(config.id)
+    except ValueError as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        logger.exception("Kill-Switch für Konfiguration %s fehlgeschlagen", config.id)
+        ErrorLog.objects.create(
+            configuration=config,
+            severity="critical",
+            source="views.kill_switch",
+            exception_type=type(exc).__name__,
+            message=str(exc)[:4000],
+            details={"exchange": config.exchange, "symbols": _symbols(config)},
+        )
+        return JsonResponse(
+            {"status": "error", "message": "Kill-Switch fehlgeschlagen. Siehe Fehler-Log."},
+            status=500,
+        )
+    status = "ok" if not result["errors"] else "partial"
+    return JsonResponse({"status": status, **result})
 
 
 @login_required
@@ -643,10 +725,26 @@ def _pdf_response(request, template, context, filename, disposition="attachment"
     return response
 
 
-@login_required
-@require_GET
-def generate_report(request, config_id):
-    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+def _report_filename(config, extension):
+    def safe_component(value):
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-._")
+        return cleaned or "unknown"
+
+    timestamp = timezone.localtime().strftime("%Y%m%d_%H%M%S")
+    return (
+        "_".join(
+            (
+                safe_component(config.user.username),
+                safe_component(config.exchange),
+                str(config.id),
+                timestamp,
+            )
+        )
+        + f".{extension}"
+    )
+
+
+def _build_report_context(config):
     logs = list(config.logs.all().order_by("timestamp", "id"))
     sell_logs = [log for log in logs if log.action == "sell"]
     symbol_counts = Counter(log.symbol for log in logs)
@@ -671,8 +769,7 @@ def generate_report(request, config_id):
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError as exc:
-        logger.exception("Diagramm-Engine ist nicht verfügbar")
-        return HttpResponse(f"Diagramm-Engine nicht verfügbar: {exc}", status=503)
+        raise RuntimeError(f"Diagramm-Engine nicht verfügbar: {exc}") from exc
 
     with _PLOT_LOCK:
         figure, axis = plt.subplots(figsize=(6, 4))
@@ -726,9 +823,10 @@ def generate_report(request, config_id):
         axis.legend()
         profitability_chart = _figure_to_base64(figure, plt)
 
-    context = {
+    return {
         "config": config,
         "logs": logs,
+        "generated_at": timezone.localtime(),
         "total_trades": len(logs),
         "buy_trades": sum(log.action == "buy" for log in logs),
         "sell_trades": len(sell_logs),
@@ -745,12 +843,91 @@ def generate_report(request, config_id):
         "symbol_profit_counts": dict(symbol_profit_counts),
         "profitability_chart": profitability_chart,
     }
+
+
+@login_required
+@require_GET
+def generate_report(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    try:
+        context = _build_report_context(config)
+    except RuntimeError as exc:
+        logger.exception("Trading-Report konnte nicht erstellt werden")
+        return HttpResponse(str(exc), status=503)
     return _pdf_response(
         request,
         "trading/report.html",
         context,
-        f"trading-report-config-{config.id}.pdf",
+        _report_filename(config, "pdf"),
     )
+
+
+@login_required
+@require_GET
+def generate_report_html(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    try:
+        context = _build_report_context(config)
+    except RuntimeError as exc:
+        logger.exception("HTML-Report konnte nicht erstellt werden")
+        return HttpResponse(str(exc), status=503)
+    html = render_to_string("trading/report.html", context, request=request)
+    response = HttpResponse(html, content_type="text/html; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{_report_filename(config, "html")}"'
+    return response
+
+
+class _CsvEcho:
+    def write(self, value):
+        return value
+
+
+@login_required
+@require_GET
+def generate_report_csv(request, config_id):
+    config = get_object_or_404(Configuration, id=config_id, user=request.user)
+    queryset = config.logs.all().order_by("timestamp", "id")
+    writer = csv.writer(_CsvEcho())
+
+    def rows():
+        yield "\ufeff"
+        yield writer.writerow(
+            [
+                "timestamp",
+                "symbol",
+                "action",
+                "price",
+                "amount",
+                "fee_amount",
+                "order_id",
+                "pl_nominal",
+                "pl_relative",
+                "total_pl",
+                "current_capital",
+                "tank",
+            ]
+        )
+        for log in queryset.iterator(chunk_size=1000):
+            yield writer.writerow(
+                [
+                    timezone.localtime(log.timestamp).isoformat(),
+                    log.symbol,
+                    log.action,
+                    log.price,
+                    log.amount,
+                    log.fee_amount,
+                    log.order_id,
+                    log.pl_nominal,
+                    log.pl_relative,
+                    log.total_pl,
+                    log.current_capital,
+                    log.tank,
+                ]
+            )
+
+    response = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{_report_filename(config, "csv")}"'
+    return response
 
 
 def _combination_count(params, symbol_count):

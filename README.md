@@ -2,7 +2,9 @@
 
 Django-/Channels-Anwendung für **Paper Trading**, Marktvisualisierung und parametrisierte Backtests. Der Bot simuliert Orders; er sendet keine echten Kauf- oder Verkaufsaufträge an eine Börse.
 
-Binance-Kurse laufen über einen persistenten kombinierten WebSocket-Stream (kein REST-Polling/Request-Weight). BitMart Spot nutzt die aktuelle V3-Public-API, weil der Adapter in der eingesetzten CCXT-Version nicht mehr enthalten ist. Beim Speichern und Aktivieren einer Konfiguration werden alle Symbole live gegen die gewählte Börse und den gewählten Markt geprüft.
+Binance-Kurse laufen über einen persistenten kombinierten WebSocket-Stream (kein REST-Polling/Request-Weight). BitMart Spot nutzt die aktuelle V3-Public-API; Bitunix Spot/Futures ist über öffentliche, defensiv gedrosselte Adapter integriert. Beim Speichern und Aktivieren werden alle Symbole live geprüft. Das Dashboard bietet paginierte Logs, PDF/HTML/CSV-Reports und einen doppelt bestätigten Kill-Switch.
+
+Ausführliche Bedienung, Indikatorformeln und Betriebsanweisungen stehen in [`MANUAL.md`](MANUAL.md). Versionshistorie: [`CHANGELOG.md`](CHANGELOG.md). Aktuelle Version: [`VERSION`](VERSION).
 
 ## Lokal starten
 

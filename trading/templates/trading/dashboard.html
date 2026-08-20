@@ -21,7 +21,12 @@
             {% csrf_token %}<button class="btn btn-success" type="submit">Bot aktivieren</button>
         </form>
         {% endif %}
-        <a class="btn btn-outline-primary" href="{% url 'generate_report' config.id %}">PDF-Report</a>
+        <div class="btn-group" role="group" aria-label="Report exportieren">
+            <a class="btn btn-outline-primary" href="{% url 'generate_report' config.id %}">PDF</a>
+            <a class="btn btn-outline-primary" href="{% url 'generate_report_html' config.id %}">HTML</a>
+            <a class="btn btn-outline-primary" href="{% url 'generate_report_csv' config.id %}">CSV</a>
+        </div>
+        <button id="kill-switch" class="btn btn-danger" type="button" {% if not config.is_running %}disabled title="Bot muss laufen"{% endif %}>⚠ Alle Positionen schließen</button>
         <form method="post" action="{% url 'reset_log' config.id %}" onsubmit="return confirm('Trading-Log und simuliertes Portfolio wirklich zurücksetzen?');">
             {% csrf_token %}<button class="btn btn-warning" type="submit">Trading-Log zurücksetzen</button>
         </form>
@@ -122,7 +127,7 @@
 
 <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
-        <span>Trading-Log</span><small class="text-muted">maximal {{ logs|length }} geladene Einträge</small>
+        <span>Trading-Log</span><small class="text-muted">100 Einträge pro Seite</small>
     </div>
     <div class="table-responsive">
         <table class="table table-sm table-striped mb-0">
@@ -135,6 +140,11 @@
                 {% empty %}<tr><td colspan="10" class="text-center text-muted">Noch keine Trades.</td></tr>{% endfor %}
             </tbody>
         </table>
+    </div>
+    <div class="card-footer d-flex justify-content-between align-items-center">
+        <button id="log-prev" class="btn btn-sm btn-outline-secondary" type="button" disabled>← Neuere</button>
+        <span id="log-page" class="small text-muted">Seite 1</span>
+        <button id="log-next" class="btn btn-sm btn-outline-secondary" type="button" disabled>Ältere →</button>
     </div>
 </div>
 {{ symbols|json_script:"dashboard-symbols" }}
@@ -157,6 +167,7 @@
     const symbols = JSON.parse(document.getElementById("dashboard-symbols").textContent);
     const csrfToken = document.querySelector("input[name=csrfmiddlewaretoken]").value;
     let activeSymbol = symbols[0] || null;
+    let logPage = 1;
 
     async function requestJson(url, options) {
         const response = await fetch(url, options);
@@ -254,33 +265,68 @@
 
     async function updateLogs() {
         try {
-            const logs = await requestJson("{% url 'logs_api' config.id %}");
-            const openBuyId = {};
-            logs.forEach(log => {
-                if (log.action === "buy") openBuyId[log.symbol] = log.id;
-                if (log.action === "sell") delete openBuyId[log.symbol];
-            });
+            const payload = await requestJson("{% url 'logs_api' config.id %}?page=" + logPage);
+            const logs = payload.results;
+            const openSymbols = new Set(payload.open_symbols);
+            logPage = payload.pagination.page;
             const body = document.getElementById("trading-log-body");
             body.replaceChildren();
             if (!logs.length) {
                 const row = document.createElement("tr");
-                const cell = makeCell("Noch keine Trades."); cell.colSpan = 10; cell.className = "text-center text-muted"; row.append(cell); body.append(row); return;
+                const cell = makeCell("Noch keine Trades.");
+                cell.colSpan = 10;
+                cell.className = "text-center text-muted";
+                row.append(cell);
+                body.append(row);
             }
             logs.forEach(log => {
                 const row = document.createElement("tr");
                 row.className = log.action === "buy" ? "table-success" : "table-danger";
                 [new Date(log.timestamp).toLocaleString(), log.symbol, log.action, log.price, log.amount, log.fee_amount, log.pl_nominal, log.total_pl, log.current_capital].forEach(value => row.append(makeCell(value)));
                 const actionCell = document.createElement("td");
-                if (log.action === "buy" && openBuyId[log.symbol] === log.id) {
+                if (log.action === "buy" && openSymbols.has(log.symbol)) {
                     const button = document.createElement("button");
-                    button.type = "button"; button.className = "btn btn-sm btn-warning"; button.textContent = "Verkaufen";
+                    button.type = "button";
+                    button.className = "btn btn-sm btn-warning";
+                    button.textContent = "Verkaufen";
                     button.addEventListener("click", () => manualSell(log.symbol, button));
                     actionCell.append(button);
+                    openSymbols.delete(log.symbol);
                 }
-                row.append(actionCell); body.append(row);
+                row.append(actionCell);
+                body.append(row);
             });
+            document.getElementById("log-page").textContent = `Seite ${payload.pagination.page} von ${payload.pagination.pages} (${payload.pagination.count} Einträge)`;
+            document.getElementById("log-prev").disabled = !payload.pagination.has_previous;
+            document.getElementById("log-next").disabled = !payload.pagination.has_next;
         } catch (error) { console.error("Logs:", error); }
     }
+
+    async function activateKillSwitch(button) {
+        if (!confirm("WARNUNG: Wirklich ALLE offenen Positionen sofort zum aktuellen Marktpreis schließen?")) return;
+        if (!confirm("LETZTE BESTÄTIGUNG: Diese Aktion kann nicht rückgängig gemacht werden. Alle Positionen liquidieren?")) return;
+        button.disabled = true;
+        button.textContent = "Liquidation läuft …";
+        try {
+            const body = new URLSearchParams({confirm1: "LIQUIDATE", confirm2: "LIQUIDATE"});
+            const result = await requestJson("{% url 'kill_switch' config.id %}", {
+                method: "POST",
+                headers: {"X-CSRFToken": csrfToken, "Content-Type": "application/x-www-form-urlencoded"},
+                body,
+            });
+            const sold = result.sold.length ? result.sold.join(", ") : "keine";
+            const failures = Object.entries(result.errors).map(([symbol, error]) => `${symbol}: ${error}`).join("\n");
+            alert(`Geschlossene Positionen: ${sold}` + (failures ? `\nFehler:\n${failures}` : ""));
+            logPage = 1;
+            await Promise.all([updateLogs(), updateInfo()]);
+        } catch (error) {
+            alert("Kill-Switch fehlgeschlagen: " + error.message);
+        } finally {
+            button.disabled = false;
+            button.textContent = "⚠ Alle Positionen schließen";
+        }
+    }
+
 
     document.querySelectorAll("button[data-symbol]").forEach(button => {
         button.addEventListener("shown.bs.tab", event => {
@@ -288,6 +334,11 @@
             updateChart(activeSymbol);
         });
     });
+
+    document.getElementById("log-prev").addEventListener("click", () => { if (logPage > 1) { logPage--; updateLogs(); } });
+    document.getElementById("log-next").addEventListener("click", () => { logPage++; updateLogs(); });
+    const killSwitch = document.getElementById("kill-switch");
+    if (killSwitch) killSwitch.addEventListener("click", () => activateKillSwitch(killSwitch));
 
     updateStatus(); updateInfo(); updateLogs();
     if (activeSymbol) updateChart(activeSymbol);

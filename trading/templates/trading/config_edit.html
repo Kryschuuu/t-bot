@@ -1,10 +1,18 @@
 {% extends "trading/base.html" %}
+{% block title %}Konfiguration bearbeiten · Trading Bot{% endblock %}
 {% block content %}
-<h2>Konfiguration bearbeiten (ID: {{ config.id }})</h2>
-<form method="post">
-    {% csrf_token %}
-    {{ form.as_p }}    
-    <button type="submit" class="btn btn-primary">Aktualisieren</button>
-</form>
-<a href="{% url 'config_list' %}" class="btn btn-secondary mt-3">Zurück zur Konfigurationsliste</a>
+<div class="card">
+  <div class="card-header"><h1 class="h3 mb-0">Konfiguration bearbeiten · #{{ config.id }}</h1></div>
+  <div class="card-body">
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% include "trading/_configuration_fields.html" %}
+      <div class="d-flex gap-2 mt-4">
+        <button type="submit" class="btn btn-primary">Aktualisieren und prüfen</button>
+        <a href="{% url 'config_list' %}" class="btn btn-secondary">Abbrechen</a>
+      </div>
+    </form>
+  </div>
+</div>
 {% endblock %}
+{% block extra_js %}{% include "trading/_symbol_autocomplete_js.html" %}{% endblock %}

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 from asgiref.sync import async_to_sync
 from django.contrib.auth.models import User
+from django.http import HttpResponse
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
@@ -14,11 +15,13 @@ from trading.forms import BacktestForm, ConfigurationForm
 from trading.market_data import (
     BinancePublicMarketData,
     BitMartPublicMarketData,
+    BitunixPublicMarketData,
     MarketDataConnectionError,
     SymbolValidationError,
     _ban_timestamp,
 )
 from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
+from trading.symbols import get_available_symbols
 from trading.tasks import run_backtest
 from trading.trading_bot import TradingBot
 
@@ -86,6 +89,7 @@ class FormTests(TestCase):
         )
         self.assertFalse(form.is_valid())
         self.assertIn("trade_amount", form.errors)
+        self.assertIn("is-invalid", form.fields["trade_amount"].widget.attrs["class"])
 
     def test_configuration_reports_exchange_specific_invalid_symbols(self):
         self.validate_exchange_symbols.side_effect = SymbolValidationError(
@@ -194,6 +198,31 @@ class MarketDataAdapterTests(TestCase):
         provider.close()
         self.assertEqual(result["BTC/USDT"]["last"], "321.00")
 
+    def test_binance_autocomplete_differs_between_spot_and_futures(self):
+        spot = get_available_symbols("binance", "spot")
+        futures = get_available_symbols("binance", "futures")
+        self.assertNotIn("1000PEPE/USDT", spot)
+        self.assertIn("1000PEPE/USDT", futures)
+
+    def test_bitunix_futures_uses_validated_batch_ticker(self):
+        provider = BitunixPublicMarketData("futures")
+
+        def fake_json(url, **kwargs):
+            if url.endswith("/trading_pairs"):
+                return {
+                    "code": 0,
+                    "data": [{"symbol": "BTCUSDT", "symbolStatus": "OPEN"}],
+                }
+            return {
+                "code": 0,
+                "data": [{"symbol": "BTCUSDT", "lastPrice": "65432.1"}],
+            }
+
+        provider._json = fake_json
+        result = provider.fetch_tickers(["BTC/USDT"])
+        provider.close()
+        self.assertEqual(result["BTC/USDT"]["last"], "65432.1")
+
 
 @override_settings(PASSPHRASE_GATE_ENABLED=False, AUTOSTART_BOTS=False)
 class ViewSecurityTests(TestCase):
@@ -246,6 +275,87 @@ class ViewSecurityTests(TestCase):
             {"config_id": self.config.id, "symbol": "ETH/USDT"},
         )
         self.assertEqual(response.status_code, 400)
+
+    def create_trading_logs(self, count):
+        for index in range(count):
+            TradingLog.objects.create(
+                configuration=self.config,
+                symbol="BTC/USDT",
+                action="buy" if index % 2 == 0 else "sell",
+                price=Decimal(100 + index),
+                amount=Decimal("0.1"),
+                fee_amount=Decimal("0.01"),
+                pl_nominal=Decimal(index % 3 - 1),
+                pl_relative=Decimal(0),
+                total_pl=Decimal(index),
+                current_capital=Decimal(100 + index),
+                tank=Decimal(index),
+                order_id=f"test-{index}",
+            )
+
+    def test_trading_log_api_is_paginated_by_100(self):
+        self.create_trading_logs(205)
+        first = self.client.get(reverse("logs_api", args=[self.config.id]), {"page": 1}).json()
+        third = self.client.get(reverse("logs_api", args=[self.config.id]), {"page": 3}).json()
+        self.assertEqual(len(first["results"]), 100)
+        self.assertEqual(first["pagination"]["pages"], 3)
+        self.assertEqual(first["pagination"]["count"], 205)
+        self.assertEqual(len(third["results"]), 5)
+
+    def test_csv_and_html_reports_use_descriptive_filename(self):
+        self.create_trading_logs(1)
+        with (
+            patch(
+                "trading.views._build_report_context",
+                return_value={"config": self.config, "logs": []},
+            ),
+            patch("trading.views._pdf_response", return_value=HttpResponse()) as pdf_response,
+        ):
+            self.client.get(reverse("generate_report", args=[self.config.id]))
+        self.assertRegex(pdf_response.call_args.args[3], r"owner_binance_\d+_\d{8}_\d{6}\.pdf")
+
+        csv_response = self.client.get(reverse("generate_report_csv", args=[self.config.id]))
+        self.assertEqual(csv_response.status_code, 200)
+        disposition = csv_response["Content-Disposition"]
+        self.assertRegex(disposition, r"owner_binance_\d+_\d{8}_\d{6}\.csv")
+        with patch(
+            "trading.views._build_report_context",
+            return_value={"config": self.config, "logs": []},
+        ):
+            html_response = self.client.get(reverse("generate_report_html", args=[self.config.id]))
+        self.assertEqual(html_response.status_code, 200)
+        self.assertRegex(
+            html_response["Content-Disposition"],
+            r"owner_binance_\d+_\d{8}_\d{6}\.html",
+        )
+
+    def test_kill_switch_requires_double_confirmation(self):
+        url = reverse("kill_switch", args=[self.config.id])
+        self.assertEqual(self.client.post(url, {"confirm1": "LIQUIDATE"}).status_code, 400)
+        with patch(
+            "trading.views.bot_manager.kill_switch",
+            return_value={"sold": ["BTC/USDT"], "errors": {}},
+        ) as kill_switch:
+            response = self.client.post(
+                url,
+                {"confirm1": "LIQUIDATE", "confirm2": "LIQUIDATE"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["sold"], ["BTC/USDT"])
+        kill_switch.assert_called_once_with(self.config.id)
+
+    def test_symbol_autocomplete_uses_exchange_and_market(self):
+        with patch(
+            "trading.views.get_available_symbols",
+            return_value=("BTC/USDT", "ETH/USDT"),
+        ) as catalog:
+            response = self.client.get(
+                reverse("symbol_suggestions_api"),
+                {"exchange": "bitunix", "market": "futures", "q": "BT"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["suggestions"], ["BTC/USDT"])
+        catalog.assert_called_once_with("bitunix", "futures")
 
     def test_error_log_is_owner_scoped_and_can_resolve_entries(self):
         own_error = ErrorLog.objects.create(
@@ -300,6 +410,16 @@ class TradingBotTests(TransactionTestCase):
             fee=Decimal("0.1"),
             countdown=0,
         )
+
+    def test_kill_switch_uses_fresh_ticker_and_closes_every_position(self):
+        bot = TradingBot(self.config)
+        bot.price_buffer["BTC/USDT"] = [Decimal(100)]
+        async_to_sync(bot.execute_trade)("BTC/USDT", "buy")
+        bot.fetch_tickers = AsyncMock(return_value={"BTC/USDT": {"last": "105"}})
+        result = async_to_sync(bot.liquidate_all_positions)()
+        self.assertEqual(result, {"sold": ["BTC/USDT"], "errors": {}})
+        self.assertEqual(bot.positions, {})
+        self.assertEqual(TradingLog.objects.filter(action="sell").count(), 1)
 
     def test_buy_and_sell_keep_amount_and_include_buy_fee(self):
         bot = TradingBot(self.config)

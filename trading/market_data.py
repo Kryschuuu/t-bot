@@ -262,6 +262,109 @@ class BinancePublicMarketData:
         await self._disconnect()
 
 
+class BitunixPublicMarketData(PublicHTTPMarketData):
+    """Öffentliche Bitunix-Marktdaten für Paper-Trading (ohne API-Schlüssel)."""
+
+    futures_base = "https://fapi.bitunix.com/api/v1/futures/market"
+    spot_base = "https://openapi.bitunix.com/api/spot/v1"
+
+    def __init__(self, market):
+        if market not in {"spot", "futures"}:
+            raise ValueError(f"Nicht unterstützter Bitunix-Markt: {market}")
+        super().__init__()
+        self.market = market
+        self._available_symbols = None
+
+    @staticmethod
+    def _successful(payload):
+        return str(payload.get("code")) == "0"
+
+    def available_symbols(self):
+        if self._available_symbols is not None:
+            return self._available_symbols
+        if self.market == "futures":
+            payload = self._json(f"{self.futures_base}/trading_pairs")
+        else:
+            payload = self._json(f"{self.spot_base}/common/coin_pair/list")
+        if not self._successful(payload):
+            raise MarketDataConnectionError(
+                f"Bitunix-Symbolliste fehlgeschlagen ({payload.get('code')}): "
+                f"{payload.get('msg', payload.get('message', payload))}"
+            )
+        data = payload.get("data") or []
+        if isinstance(data, dict):
+            data = data.get("list") or data.get("records") or data.get("data") or []
+        symbols = set()
+        for item in data:
+            if isinstance(item, str):
+                compact = item
+                active = True
+            else:
+                compact = item.get("symbol") or item.get("symbolName") or item.get("id")
+                status = str(item.get("symbolStatus", item.get("isOpen", "OPEN"))).upper()
+                active = status in {"OPEN", "1", "TRUE"}
+            if compact and active:
+                symbols.add(str(compact).replace("_", "").replace("/", "").upper())
+        if not symbols:
+            raise MarketDataConnectionError(
+                "Bitunix lieferte keine nutzbare Symbolliste; die Konfiguration wird "
+                "vorsorglich nicht aktiviert."
+            )
+        self._available_symbols = symbols
+        return symbols
+
+    def validate_symbols(self, symbols):
+        available = self.available_symbols()
+        invalid = [symbol for symbol in symbols if _compact_symbol(symbol) not in available]
+        if invalid:
+            raise SymbolValidationError("Bitunix", invalid)
+
+    def fetch_tickers(self, symbols):
+        self.validate_symbols(symbols)
+        compact_to_original = {_compact_symbol(symbol): symbol for symbol in symbols}
+        prices = {}
+        if self.market == "futures":
+            payload = self._json(
+                f"{self.futures_base}/tickers",
+                params={"symbols": ",".join(compact_to_original)},
+            )
+            if not self._successful(payload):
+                raise MarketDataError(
+                    f"Bitunix-Ticker fehlgeschlagen ({payload.get('code')}): {payload.get('msg')}"
+                )
+            rows = payload.get("data") or []
+            for row in rows:
+                compact = str(row.get("symbol", "")).upper()
+                original = compact_to_original.get(compact)
+                last = row.get("lastPrice") or row.get("last") or row.get("markPrice")
+                if original and last is not None:
+                    prices[original] = {"last": last}
+        else:
+            for compact, original in compact_to_original.items():
+                payload = self._json(
+                    f"{self.spot_base}/market/last_price",
+                    params={"symbol": compact},
+                )
+                if not self._successful(payload):
+                    raise MarketDataError(
+                        f"Bitunix-Spot-Ticker für {original} fehlgeschlagen "
+                        f"({payload.get('code')}): {payload.get('msg')}"
+                    )
+                data = payload.get("data")
+                last = data.get("lastPrice") if isinstance(data, dict) else data
+                if last is None:
+                    raise MarketDataConnectionError(
+                        f"Bitunix lieferte keinen Spot-Preis für {original}"
+                    )
+                prices[original] = {"last": last}
+        missing = set(symbols).difference(prices)
+        if missing:
+            raise MarketDataConnectionError(
+                f"Bitunix lieferte keine Preise für: {', '.join(sorted(missing))}"
+            )
+        return prices
+
+
 class BitMartPublicMarketData(PublicHTTPMarketData):
     """Ersatz für den in CCXT 4.5 entfernten BitMart-Adapter (Spot-Marktdaten)."""
 
@@ -328,8 +431,11 @@ def validate_exchange_symbols(exchange_id, market, symbols):
         provider = BinancePublicMarketData(market)
         async_to_sync(provider.validate_symbols_async)(symbols)
         return
-    if exchange_id == "bitmart":
-        provider = BitMartPublicMarketData(market)
+    if exchange_id in {"bitmart", "bitunix"}:
+        provider_class = (
+            BitMartPublicMarketData if exchange_id == "bitmart" else BitunixPublicMarketData
+        )
+        provider = provider_class(market)
         try:
             provider.validate_symbols(symbols)
         finally:

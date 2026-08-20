@@ -18,6 +18,7 @@ class Configuration(models.Model):
         ("bingx", "BingX"),
         ("bybit", "Bybit"),
         ("bitmart", "BitMart"),
+        ("bitunix", "Bitunix"),
     )
 
     is_running = models.BooleanField(

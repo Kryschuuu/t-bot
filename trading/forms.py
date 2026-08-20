@@ -110,9 +110,27 @@ class ConfigurationForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        for field in self.fields.values():
+            if isinstance(field.widget, forms.CheckboxInput):
+                css_class = "form-check-input"
+            elif isinstance(field.widget, forms.Select):
+                css_class = "form-select"
+            else:
+                css_class = "form-control"
+            field.widget.attrs["class"] = " ".join(
+                filter(None, (field.widget.attrs.get("class"), css_class))
+            )
         if self.instance and self.instance.pk:
             self.fields["api_key"].widget.attrs["placeholder"] = "Unverändert lassen"
             self.fields["secret_key"].widget.attrs["placeholder"] = "Unverändert lassen"
+
+    def full_clean(self):
+        super().full_clean()
+        for name in self.errors:
+            if name in self.fields:
+                widget = self.fields[name].widget
+                widget.attrs["class"] = f"{widget.attrs.get('class', '')} is-invalid".strip()
+                widget.attrs["aria-invalid"] = "true"
 
     def clean_name(self):
         name = self.cleaned_data["name"].strip()
@@ -193,6 +211,17 @@ class ConfigurationForm(forms.ModelForm):
         exchange = cleaned_data.get("exchange")
         market = cleaned_data.get("market")
         symbols_value = cleaned_data.get("symbols")
+        if (
+            exchange in {"bitmart", "bitunix"}
+            and market == "spot"
+            and interval is not None
+            and interval < 5
+        ):
+            self.add_error(
+                "time_interval",
+                "Für BitMart/Bitunix Spot sind mindestens 5 Sekunden erforderlich, "
+                "damit Einzel-Ticker sicher unter dem API-Limit bleiben.",
+            )
         validation_fields = ("exchange", "market", "symbols")
         validation_blocked = any(field in self.errors for field in validation_fields)
         if exchange and market and symbols_value and not validation_blocked:

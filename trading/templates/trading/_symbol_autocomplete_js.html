@@ -1,0 +1,56 @@
+<script>
+(() => {
+  "use strict";
+  const input = document.getElementById("id_symbols");
+  const exchange = document.getElementById("id_exchange");
+  const market = document.getElementById("id_market");
+  const list = document.getElementById("symbol-suggestions");
+  if (!input || !exchange || !market || !list) return;
+  let timer = null;
+  let requestController = null;
+
+  function currentToken() {
+    return input.value.split(",").at(-1).trim().toUpperCase();
+  }
+  function selectSymbol(symbol) {
+    const parts = input.value.split(",");
+    parts[parts.length - 1] = " " + symbol;
+    input.value = parts.map(part => part.trim()).filter(Boolean).join(", ") + ", ";
+    list.classList.add("d-none");
+    input.focus();
+  }
+  async function loadSuggestions() {
+    if (requestController) requestController.abort();
+    requestController = new AbortController();
+    const query = new URLSearchParams({exchange: exchange.value, market: market.value, q: currentToken()});
+    try {
+      const response = await fetch("{% url 'symbol_suggestions_api' %}?" + query, {signal: requestController.signal});
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      list.replaceChildren();
+      payload.suggestions.forEach(symbol => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "list-group-item list-group-item-action py-1";
+        button.textContent = symbol;
+        button.addEventListener("click", () => selectSymbol(symbol));
+        list.append(button);
+      });
+      list.classList.toggle("d-none", payload.suggestions.length === 0);
+    } catch (error) {
+      if (error.name !== "AbortError") list.classList.add("d-none");
+    }
+  }
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(loadSuggestions, 250);
+  }
+  input.addEventListener("input", schedule);
+  input.addEventListener("focus", schedule);
+  exchange.addEventListener("change", loadSuggestions);
+  market.addEventListener("change", loadSuggestions);
+  document.addEventListener("click", event => {
+    if (!list.contains(event.target) && event.target !== input) list.classList.add("d-none");
+  });
+})();
+</script>
