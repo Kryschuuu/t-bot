@@ -36,6 +36,28 @@ logger = logging.getLogger("trading")
 _EIGHT_PLACES = Decimal("0.00000001")
 _MAX_DECIMAL = Decimal("999999999999.99999999")
 _DB_RECOVERY_LOCK = threading.Lock()
+_DB_CIRCUIT_LOCK = threading.Lock()
+_DB_CIRCUIT_OPEN_UNTIL = 0.0
+_DB_CIRCUIT_LAST_ERROR = ""
+
+
+def _db_circuit_remaining():
+    with _DB_CIRCUIT_LOCK:
+        return max(0.0, _DB_CIRCUIT_OPEN_UNTIL - time.monotonic())
+
+
+def _open_db_circuit(error):
+    global _DB_CIRCUIT_OPEN_UNTIL, _DB_CIRCUIT_LAST_ERROR
+    with _DB_CIRCUIT_LOCK:
+        _DB_CIRCUIT_OPEN_UNTIL = time.monotonic() + settings.DB_CIRCUIT_BREAKER_SECONDS
+        _DB_CIRCUIT_LAST_ERROR = f"{type(error).__name__}: {error}"
+
+
+def _close_db_circuit():
+    global _DB_CIRCUIT_OPEN_UNTIL, _DB_CIRCUIT_LAST_ERROR
+    with _DB_CIRCUIT_LOCK:
+        _DB_CIRCUIT_OPEN_UNTIL = 0.0
+        _DB_CIRCUIT_LAST_ERROR = ""
 
 
 def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
@@ -44,9 +66,16 @@ def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            remaining = _db_circuit_remaining()
+            if remaining:
+                if suppress:
+                    return None
+                raise OperationalError(f"Datenbank-Circuit-Breaker noch {remaining:.0f}s geöffnet")
             try:
                 close_old_connections()
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                _close_db_circuit()
+                return result
             except (InterfaceError, OperationalError) as exc:
                 last_error = exc
 
@@ -56,6 +85,13 @@ def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
             # Nur ein Executor-Thread probiert aktiv die Wiederherstellung.
             # Alle anderen warten und laufen nach seiner Erholung direkt weiter.
             with _DB_RECOVERY_LOCK:
+                remaining = _db_circuit_remaining()
+                if remaining:
+                    if suppress:
+                        return None
+                    raise OperationalError(
+                        f"Datenbank-Circuit-Breaker noch {remaining:.0f}s geöffnet"
+                    )
                 for attempt in range(1, retry_limit + 1):
                     message = str(last_error)
                     dns_failure = "could not translate host name" in message.lower()
@@ -65,7 +101,9 @@ def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
                         logger.debug("Defekte DB-Verbindung war bereits geschlossen")
                     try:
                         close_old_connections()
-                        return func(*args, **kwargs)
+                        result = func(*args, **kwargs)
+                        _close_db_circuit()
+                        return result
                     except (InterfaceError, OperationalError) as exc:
                         last_error = exc
                         if attempt >= retry_limit:
@@ -84,10 +122,12 @@ def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
                         )
                         time.sleep(delay)
 
+            _open_db_circuit(last_error)
             logger.error(
-                "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen (%s): %s",
+                "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen; Circuit %ss geöffnet (%s): %s",
                 func.__name__,
                 retry_limit,
+                settings.DB_CIRCUIT_BREAKER_SECONDS,
                 type(last_error).__name__,
                 last_error,
             )
@@ -214,8 +254,11 @@ class TradingBot(threading.Thread):
         self.last_success_at = None
         self.started_at = time.time()
         self._data_log_counts = {}
+        self._last_data_log_at = {}
+        self._last_config_refresh = time.monotonic()
         self._persisted_errors = {}
         self._rate_limit_delay = 0
+        self._last_db_warning_at = 0
         self.liquidating = False
         self._market_data_lock = None
         self.start_time = time.time() + max(0, config.countdown) * 60
@@ -330,8 +373,13 @@ class TradingBot(threading.Thread):
     async def main_loop(self):
         while self.running:
             try:
-                self.config = await db_get_config(self.config_id)
-                self._sync_symbols()
+                if (
+                    time.monotonic() - self._last_config_refresh
+                    >= settings.BOT_CONFIG_REFRESH_SECONDS
+                ):
+                    self.config = await db_get_config(self.config_id)
+                    self._last_config_refresh = time.monotonic()
+                    self._sync_symbols()
                 try:
                     tickers = await self.fetch_tickers(self.symbols)
                 except Exception as exc:
@@ -432,15 +480,22 @@ class TradingBot(threading.Thread):
                 logger.info("Konfiguration %s wurde gelöscht; Bot stoppt", self.config_id)
                 self.running = False
             except Exception as exc:
-                logger.exception("Main-Loop-Fehler für Bot %s", self.config_id)
                 self.last_error = f"main_loop: {exc}"
                 self.last_error_at = time.time()
                 if isinstance(exc, (OperationalError, InterfaceError)):
                     # Wenn Postgres/DNS selbst ausgefallen ist, würde ein
-                    # ErrorLog-Schreibversuch nur einen zweiten langen
-                    # Reconnect-Zyklus auslösen. Bis zur Erholung nach STDOUT.
+                    # ErrorLog-Schreibversuch nur einen zweiten Reconnect-Zyklus
+                    # auslösen. Pro Bot höchstens alle fünf Minuten warnen.
+                    if time.time() - self._last_db_warning_at >= 300:
+                        logger.warning(
+                            "Bot %s wartet auf Datenbank-Recovery: %s",
+                            self.config_id,
+                            exc,
+                        )
+                        self._last_db_warning_at = time.time()
                     await self._sleep(30)
                     continue
+                logger.exception("Main-Loop-Fehler für Bot %s", self.config_id)
                 await self._persist_error("main_loop", "trading_bot.main_loop", exc)
                 await self._sleep(2)
 
@@ -492,30 +547,36 @@ class TradingBot(threading.Thread):
         min_price = min(prices)
         mvd = min_price / max_price if max_price else Decimal(0)
 
-        saved = await db_create_datalog_safe(
-            configuration_id=self.config_id,
-            symbol=symbol,
-            price=_bounded(current),
-            max_price=_bounded(max_price),
-            min_price=_bounded(min_price),
-            current_da=_bounded(current_da),
-            nda=_bounded(nda),
-            prev_da=_bounded(previous_da),
-            prev_nda=_bounded(previous_nda),
-            dva=_bounded(dva),
-            deltadelta=_bounded(deltadelta),
-            div_DVA_prev_NDA=_bounded(acceleration),
-            mvd=_bounded(mvd),
+        now = time.monotonic()
+        should_persist = (
+            now - self._last_data_log_at.get(symbol, 0) >= settings.DATA_LOG_WRITE_INTERVAL_SECONDS
         )
-        if saved:
-            count = self._data_log_counts.get(symbol, 0) + 1
-            self._data_log_counts[symbol] = count
-            if count % settings.DATA_LOG_CLEANUP_EVERY == 0:
-                await db_trim_datalog(
-                    self.config_id,
-                    symbol,
-                    settings.MAX_DATA_LOGS_PER_SYMBOL,
-                )
+        if should_persist:
+            saved = await db_create_datalog_safe(
+                configuration_id=self.config_id,
+                symbol=symbol,
+                price=_bounded(current),
+                max_price=_bounded(max_price),
+                min_price=_bounded(min_price),
+                current_da=_bounded(current_da),
+                nda=_bounded(nda),
+                prev_da=_bounded(previous_da),
+                prev_nda=_bounded(previous_nda),
+                dva=_bounded(dva),
+                deltadelta=_bounded(deltadelta),
+                div_DVA_prev_NDA=_bounded(acceleration),
+                mvd=_bounded(mvd),
+            )
+            if saved:
+                self._last_data_log_at[symbol] = now
+                count = self._data_log_counts.get(symbol, 0) + 1
+                self._data_log_counts[symbol] = count
+                if count % settings.DATA_LOG_CLEANUP_EVERY == 0:
+                    await db_trim_datalog(
+                        self.config_id,
+                        symbol,
+                        settings.MAX_DATA_LOGS_PER_SYMBOL,
+                    )
         await self.check_trading(symbol, current, nda, deltadelta, acceleration)
 
     def _global_loss_limit_reached(self):

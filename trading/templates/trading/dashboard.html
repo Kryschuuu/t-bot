@@ -382,7 +382,7 @@
     updateStatus(); updateInfo(); updateLogs();
     if (activeSymbol) updateChart(activeSymbol);
     setInterval(updateStatus, 10000);
-    setInterval(() => { updateInfo(); updateLogs(); if (activeSymbol) updateChart(activeSymbol); }, 5000);
+    setInterval(() => { updateInfo(); updateLogs(); if (activeSymbol) updateChart(activeSymbol); }, 10000);
 })();
 </script>
 {% endif %}

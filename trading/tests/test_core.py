@@ -25,7 +25,7 @@ from trading.middleware import DatabaseAvailabilityMiddleware
 from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 from trading.symbols import get_available_symbols
 from trading.tasks import run_backtest
-from trading.trading_bot import TradingBot
+from trading.trading_bot import TradingBot, _close_db_circuit, db_safe
 
 
 class BacktestingTests(TestCase):
@@ -227,6 +227,29 @@ class MarketDataAdapterTests(TestCase):
 
 
 class DatabaseAvailabilityMiddlewareTests(TestCase):
+    def tearDown(self):
+        _close_db_circuit()
+
+    @override_settings(DB_CIRCUIT_BREAKER_SECONDS=30)
+    def test_db_safe_opens_circuit_and_suppresses_followup_writes(self):
+        calls = 0
+
+        @db_safe(max_retries=1, base_delay=0.1, max_delay=0.1)
+        def failing_read():
+            nonlocal calls
+            calls += 1
+            raise OperationalError("connection refused")
+
+        with self.assertRaises(OperationalError):
+            failing_read()
+        self.assertEqual(calls, 2)
+
+        @db_safe(max_retries=1, suppress=True)
+        def blocked_write():
+            raise AssertionError("Offener Circuit darf die Funktion nicht aufrufen")
+
+        self.assertIsNone(blocked_write())
+
     def test_database_outage_returns_json_503_for_api(self):
         def unavailable(request):
             raise OperationalError("connection refused")

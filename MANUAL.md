@@ -1,6 +1,6 @@
 # t-bot – Benutzer- und Indikatorhandbuch
 
-**Version 2.0.1 · Stand 20. August 2026**
+**Version 2.0.3 · Stand 20. August 2026**
 
 > t-bot ist eine experimentelle **Paper-Trading-Plattform**. Orders werden simuliert und nicht an eine Börse gesendet. Ergebnisse sind keine Anlageberatung und keine Garantie für zukünftige Entwicklungen.
 
@@ -263,6 +263,8 @@ Typische Meldungen:
 - `OperationalError could not translate host name` oder `connection refused`: temporäre Render-DNS-/Postgres-Störung. t-bot koordiniert Reconnects mit Backoff und versucht nach dem privaten Host automatisch den externen TLS-Host desselben Frankfurt-Datastores.
 
 Bei einem DB-Ausfall zeigt das Webinterface HTTP 503 statt einer internen Fehlerseite. Das bereits geöffnete Dashboard stoppt weitere API-Aufrufe lokal, verdoppelt die Wartezeit bis maximal 60 Sekunden und lässt jeweils nur einen Recovery-Test zu. Login und Passphrase liegen in signierten Cookie-Sessions und verursachen deshalb keine zusätzliche DB-Request-Schleife. Nach einem Deployment ist wegen des Session-Backend-Wechsels einmaliges erneutes Anmelden normal.
+
+Für Bot-Threads greift zusätzlich ein globaler Circuit-Breaker: Nach fünf koordinierten Fehlversuchen werden weitere DB-Operationen fünf Minuten lang sofort verworfen. Danach führt genau ein Thread einen Recovery-Versuch aus. Konfigurationen werden höchstens alle 30 Sekunden neu geladen und DataLogs standardmäßig nur alle 10 Sekunden je Symbol geschrieben; die Handelsauswertung läuft unabhängig davon weiter im gewählten Marktintervall. Diese Entkopplung reduziert die Last auf Free-Postgres, kann einen im Render-Dashboard gestoppten oder defekten Datastore aber nicht softwareseitig ersetzen.
 
 ## 13. Render-Hinweise
 

@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -9,6 +11,18 @@ from django.shortcuts import redirect
 from django.urls import reverse
 
 logger = logging.getLogger("trading")
+_DB_LOG_LOCK = threading.Lock()
+_DB_LAST_LOG_AT = 0.0
+
+
+def _log_database_outage(message, exception):
+    global _DB_LAST_LOG_AT
+    now = time.monotonic()
+    with _DB_LOG_LOCK:
+        if now - _DB_LAST_LOG_AT < 60:
+            return
+        _DB_LAST_LOG_AT = now
+    logger.warning(message, exception)
 
 
 def database_unavailable_response(request):
@@ -50,12 +64,15 @@ class DatabaseAvailabilityMiddleware:
         try:
             return self.get_response(request)
         except (OperationalError, InterfaceError) as exc:
-            logger.warning("HTTP-Anfrage wegen Datenbankausfall mit 503 beantwortet: %s", exc)
+            _log_database_outage(
+                "HTTP-Anfrage wegen Datenbankausfall mit 503 beantwortet: %s",
+                exc,
+            )
             return database_unavailable_response(request)
 
     def process_exception(self, request, exception):
         if isinstance(exception, (OperationalError, InterfaceError)):
-            logger.warning("View wegen Datenbankausfall mit 503 beantwortet: %s", exception)
+            _log_database_outage("View wegen Datenbankausfall mit 503 beantwortet: %s", exception)
             return database_unavailable_response(request)
         return None
 
@@ -83,7 +100,10 @@ class PassphraseGateMiddleware:
         try:
             verified = request.session.get("passphrase_verified")
         except (OperationalError, InterfaceError) as exc:
-            logger.warning("Passphrase-Session wegen Datenbankausfall nicht lesbar: %s", exc)
+            _log_database_outage(
+                "Passphrase-Session wegen Datenbankausfall nicht lesbar: %s",
+                exc,
+            )
             return database_unavailable_response(request)
         if verified:
             return self.get_response(request)
