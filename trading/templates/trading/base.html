@@ -31,6 +31,9 @@
             </ul>
             <ul class="navbar-nav">
                 {% if user.is_authenticated %}
+                <li class="nav-item d-flex align-items-center me-2">
+                    <span class="navbar-text text-white" title="Aktuell angemeldeter Benutzer">👤 {{ user.username }}</span>
+                </li>
                 <li class="nav-item">
                     <form method="post" action="{% url 'logout' %}">
                         {% csrf_token %}

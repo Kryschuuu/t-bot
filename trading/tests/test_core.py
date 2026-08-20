@@ -307,6 +307,26 @@ class ViewSecurityTests(TestCase):
                 order_id=f"test-{index}",
             )
 
+    def test_info_api_deducts_open_position_from_available_cash(self):
+        TradingLog.objects.create(
+            configuration=self.config,
+            symbol="BTC/USDT",
+            action="buy",
+            price=Decimal(100),
+            amount=Decimal("0.1"),
+            fee_amount=Decimal("0.01"),
+            pl_nominal=Decimal(0),
+            pl_relative=Decimal(0),
+            total_pl=Decimal(0),
+            current_capital=Decimal("89.99"),
+            tank=Decimal(0),
+            order_id="open-buy",
+        )
+        response = self.client.get(reverse("info_api", args=[self.config.id])).json()
+        self.assertEqual(response["available_cash"], 89.99)
+        self.assertEqual(response["invested_capital"], 10.01)
+        self.assertEqual(response["open_position_count"], 1)
+
     def test_trading_log_api_is_paginated_by_100(self):
         self.create_trading_logs(205)
         first = self.client.get(reverse("logs_api", args=[self.config.id]), {"page": 1}).json()
@@ -440,6 +460,10 @@ class TradingBotTests(TransactionTestCase):
         bot.price_buffer["BTC/USDT"] = [Decimal(100)]
         async_to_sync(bot.execute_trade)("BTC/USDT", "buy")
         buy = TradingLog.objects.get(action="buy")
+        self.assertEqual(
+            buy.current_capital,
+            self.config.start_capital - (buy.amount * buy.price + buy.fee_amount),
+        )
         bot.price_buffer["BTC/USDT"] = [Decimal(110)]
         async_to_sync(bot.execute_trade)("BTC/USDT", "sell")
         sell = TradingLog.objects.get(action="sell")

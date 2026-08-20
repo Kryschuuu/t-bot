@@ -187,7 +187,28 @@ Der rote Button **„Alle Positionen schließen“**:
 
 Der Bot muss laufen, damit ein aktueller Preis sicher beschafft werden kann. Ein Fehler bei einem Symbol verhindert nicht die Liquidation der übrigen Symbole.
 
-## 9. Dashboard und Trading-Log
+## 9. Dashboard, Kontostand und Trading-Log
+
+### Kontostandslogik
+
+Die Oberfläche trennt jetzt Begriffe, die zuvor fälschlich als ein einzelner „aktueller Kontostand“ behandelt wurden:
+
+```text
+Verfügbarer Cash = Startkapital + realisierter P/L
+                   - Summe(Einstiegswert + Kaufgebühr offener Positionen)
+
+Netto-Marktwert offen = Summe(Menge × letzter Marktpreis - geschätzte Verkaufsgebühr)
+
+Gesamtequity = verfügbarer Cash + Netto-Marktwert offen
+
+Unrealisierter P/L = Netto-Marktwert offen - gebundenes Kapital
+```
+
+Direkt nach einem Kauf sinkt deshalb der **verfügbare Kontostand** um Positionswert plus Kaufgebühr. Die Gesamtequity bleibt – abgesehen von Gebühren und Kursbewegung – in ähnlicher Höhe. Nach dem Verkauf fließt der Nettoerlös zurück in den Cash-Bestand; der vollständige Trade-P/L wird realisiert.
+
+Beispiel: Start 1.000, Kauf 100, Kaufgebühr 0,10. Unmittelbar danach sind ungefähr 899,90 Cash verfügbar und 100,10 gebunden. Bei einem aktuellen Netto-Marktwert von 101 liegt die Equity bei ungefähr 1.000,90.
+
+### Trading-Log
 
 Das Trading-Log zeigt 100 Einträge pro Seite, neueste zuerst. **Neuere** und **Ältere** navigieren serverseitig durch die Historie. Dadurch bleibt die Seite auch bei großen Datenmengen schnell.
 
@@ -203,9 +224,11 @@ Portfolio- und Performancefelder werden regelmäßig aktualisiert. Die Equity-Ku
 
 Im Dashboard stehen drei Exportformate bereit:
 
-- **PDF**: druckbarer Report mit eingebetteten Diagrammen.
-- **HTML**: eigenständige Reportdatei für Browser/Archiv.
-- **CSV**: maschinenlesbares vollständiges Trading-Log, UTF-8 mit BOM.
+- **PDF**: druckbarer Gesamtbericht mit Konfiguration, Cash, Equity, offenen Positionen, Kennzahlen, Trading-Log und eingebetteten Diagrammen.
+- **HTML**: eigenständige Reportdatei mit denselben Informationen für Browser und Archiv.
+- **CSV**: maschinenlesbarer vollständiger Trading-Export mit Zeit, Symbol, Aktion, Preisen, Menge, Gebühren, Order-ID, P/L, Cash-Snapshot und Tank; UTF-8 mit BOM.
+
+Die Exportbuttons und wichtigen Kontofelder besitzen Hover-Hinweise (`title`), die Zweck und Dateninhalt erklären.
 
 Dateinamenschema:
 
@@ -237,7 +260,9 @@ Typische Meldungen:
 - `SymbolValidationError`: Paar ist nicht gelistet oder passt nicht zur Marktart.
 - `RateLimitError`: Börse hat 418/429 geliefert; t-bot wartet den angegebenen Zeitpunkt oder Backoff ab.
 - `WebSocketReconnectError`: interne Wiederverbindungen waren erfolglos.
-- `OperationalError could not translate host name`: temporäre Render-DNS-/Postgres-Störung. t-bot wiederholt mit Backoff.
+- `OperationalError could not translate host name` oder `connection refused`: temporäre Render-DNS-/Postgres-Störung. t-bot koordiniert Reconnects mit Backoff und versucht nach dem privaten Host automatisch den externen TLS-Host desselben Frankfurt-Datastores.
+
+Bei einem DB-Ausfall zeigt das Webinterface HTTP 503 statt einer internen Fehlerseite. Das bereits geöffnete Dashboard stoppt weitere API-Aufrufe lokal, verdoppelt die Wartezeit bis maximal 60 Sekunden und lässt jeweils nur einen Recovery-Test zu. Login und Passphrase liegen in signierten Cookie-Sessions und verursachen deshalb keine zusätzliche DB-Request-Schleife. Nach einem Deployment ist wegen des Session-Backend-Wechsels einmaliges erneutes Anmelden normal.
 
 ## 13. Render-Hinweise
 

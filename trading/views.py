@@ -76,14 +76,62 @@ def _realized_profit(config):
     )
 
 
-def _portfolio_series(config, logs, opening_profit=Decimal(0)):
-    capital = config.start_capital + opening_profit
-    equity = []
+def _cash_flow(log):
+    notional = log.amount * log.price
+    return -(notional + log.fee_amount) if log.action == "buy" else notional - log.fee_amount
+
+
+def _portfolio_snapshot(config):
+    realized_profit = _realized_profit(config)
+    invested = Decimal(0)
+    market_value = Decimal(0)
+    positions = []
+    for symbol in _symbols(config):
+        latest_trade = config.logs.filter(symbol=symbol).order_by("-timestamp", "-id").first()
+        if not latest_trade or latest_trade.action != "buy":
+            continue
+        entry_value = latest_trade.amount * latest_trade.price + latest_trade.fee_amount
+        latest_price = (
+            config.data_logs.filter(symbol=symbol)
+            .order_by("-timestamp", "-id")
+            .values_list("price", flat=True)
+            .first()
+            or latest_trade.price
+        )
+        estimated_exit_fee = latest_trade.amount * latest_price * config.fee / Decimal(100)
+        net_market_value = latest_trade.amount * latest_price - estimated_exit_fee
+        invested += entry_value
+        market_value += net_market_value
+        positions.append(
+            {
+                "symbol": symbol,
+                "amount": latest_trade.amount,
+                "entry_price": latest_trade.price,
+                "latest_price": latest_price,
+                "invested": entry_value,
+                "market_value": net_market_value,
+                "unrealized_pl": net_market_value - entry_value,
+            }
+        )
+    cash = config.start_capital + realized_profit - invested
+    return {
+        "cash": cash,
+        "realized_profit": realized_profit,
+        "invested": invested,
+        "market_value": market_value,
+        "equity": cash + market_value,
+        "unrealized_profit": market_value - invested,
+        "positions": positions,
+    }
+
+
+def _cash_series(logs, opening_cash):
+    cash = opening_cash
+    series = []
     for log in logs:
-        if log.action == "sell":
-            capital += log.pl_nominal
-        equity.append({"t": log.timestamp.isoformat(), "v": float(capital)})
-    return capital, equity
+        cash += _cash_flow(log)
+        series.append({"t": log.timestamp.isoformat(), "v": float(cash)})
+    return series
 
 
 def calculate_performance_metrics(logs):
@@ -309,14 +357,17 @@ def dashboard_view(request):
 
     metric_logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
     display_logs = list(config.logs.all().order_by("-timestamp", "-id")[:100])
-    total_profit = _realized_profit(config)
-    current_capital = config.start_capital + total_profit
+    portfolio = _portfolio_snapshot(config)
     context = {
         "config": config,
         "form": form,
         "logs": display_logs,
-        "current_capital": current_capital,
-        "tank": total_profit,
+        "current_capital": portfolio["cash"],
+        "tank": portfolio["realized_profit"],
+        "invested_capital": portfolio["invested"],
+        "account_equity": portfolio["equity"],
+        "unrealized_profit": portfolio["unrealized_profit"],
+        "open_position_count": len(portfolio["positions"]),
         "buy_orders": sum(log.action == "buy" for log in metric_logs),
         "sell_orders": sum(log.action == "sell" for log in metric_logs),
         "profitable_sells": sum(log.action == "sell" and log.pl_nominal > 0 for log in metric_logs),
@@ -446,17 +497,22 @@ def trades_api(request):
 def info_api(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
     logs = _latest_rows(config.logs.all(), _MAX_LOG_ROWS)
-    total_profit = _realized_profit(config)
-    window_profit = sum(
+    portfolio = _portfolio_snapshot(config)
+    metrics = calculate_performance_metrics(logs)
+
+    window_realized = sum(
         (log.pl_nominal for log in logs if log.action == "sell"),
         Decimal(0),
     )
-    current_capital, equity = _portfolio_series(
-        config,
-        logs,
-        opening_profit=total_profit - window_profit,
-    )
-    metrics = calculate_performance_metrics(logs)
+    realized_capital = config.start_capital + portfolio["realized_profit"] - window_realized
+    equity = []
+    for log in logs:
+        if log.action == "sell":
+            realized_capital += log.pl_nominal
+        equity.append({"t": log.timestamp.isoformat(), "v": float(realized_capital)})
+
+    window_cash_flow = sum((_cash_flow(log) for log in logs), Decimal(0))
+    cash_curve = _cash_series(logs, portfolio["cash"] - window_cash_flow)
 
     peak = float(config.start_capital)
     max_drawdown = 0.0
@@ -486,8 +542,20 @@ def info_api(request, config_id):
     sell_orders = sum(log.action == "sell" for log in logs)
     return JsonResponse(
         {
-            "current_capital": float(current_capital),
-            "tank": float(current_capital - config.start_capital),
+            "current_capital": float(portfolio["cash"]),
+            "available_cash": float(portfolio["cash"]),
+            "invested_capital": float(portfolio["invested"]),
+            "account_equity": float(portfolio["equity"]),
+            "unrealized_profit": float(portfolio["unrealized_profit"]),
+            "open_position_count": len(portfolio["positions"]),
+            "open_positions": [
+                {
+                    key: float(value) if isinstance(value, Decimal) else value
+                    for key, value in item.items()
+                }
+                for item in portfolio["positions"]
+            ],
+            "tank": float(portfolio["realized_profit"]),
             "buy_orders": buy_orders,
             "sell_orders": sell_orders,
             "profitable_sells": metrics["total_wins"],
@@ -507,6 +575,8 @@ def info_api(request, config_id):
             "equity": equity,
             "equity_timestamps": [point["t"] for point in equity],
             "equity_curve": [point["v"] for point in equity],
+            "cash_timestamps": [point["t"] for point in cash_curve],
+            "cash_curve": [point["v"] for point in cash_curve],
             "metrics": metrics,
         }
     )
@@ -746,6 +816,7 @@ def _report_filename(config, extension):
 
 def _build_report_context(config):
     logs = list(config.logs.all().order_by("timestamp", "id"))
+    portfolio = _portfolio_snapshot(config)
     sell_logs = [log for log in logs if log.action == "sell"]
     symbol_counts = Counter(log.symbol for log in logs)
     symbol_profits = defaultdict(Decimal)
@@ -831,6 +902,11 @@ def _build_report_context(config):
         "buy_trades": sum(log.action == "buy" for log in logs),
         "sell_trades": len(sell_logs),
         "total_profit": cumulative_profit,
+        "available_cash": portfolio["cash"],
+        "invested_capital": portfolio["invested"],
+        "account_equity": portfolio["equity"],
+        "unrealized_profit": portfolio["unrealized_profit"],
+        "open_positions": portfolio["positions"],
         "symbol_counts": dict(symbol_counts),
         "bar_chart": bar_chart,
         "profit_chart": profit_chart,

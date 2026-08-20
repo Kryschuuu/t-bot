@@ -601,7 +601,9 @@ class TradingBot(threading.Thread):
         return_basis = (
             amount * position["price"] + position["buy_fee"] if side == "sell" else amount * price
         )
-        current_capital = self.config.start_capital + self.realized_pl
+        # `current_capital` ist der verfügbare Cash-Kontostand. Bei einem Buy
+        # muss der gebundene Positionswert inklusive Kaufgebühr sofort sinken.
+        current_capital = self._available_capital()
         saved = await db_create_tradinglog_safe(
             configuration_id=self.config_id,
             symbol=symbol,

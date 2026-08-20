@@ -2,6 +2,19 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.0.2] – 2026-08-20
+
+### Datenbank-Failover, Request-Circuit-Breaker und Kontostandskorrektur
+
+- PostgreSQL nutzt eine libpq-Hostliste: Render-Private-DNS bleibt primär, der TLS-geschützte externe Frankfurt-Hostname dient als automatischer Fallback.
+- Signierte Cookie-Sessions entkoppeln Passphrase und Login-Sitzung von kurzfristigen DB-DNS-Störungen.
+- Dashboard-Requests pausieren nach DB-503 lokal mit exponentiellem Backoff; nur ein Recovery-Probe-Request wird zugelassen. Dadurch endet die API-503-Dauerschleife.
+- Gleichzeitige Bot-DB-Reconnects werden pro Prozess koordiniert.
+- Der verfügbare Kontostand zieht offene Positionen und Kaufgebühren sofort ab. Zusätzlich zeigt die UI gebundenes Kapital, Gesamtequity, unrealisierten P/L und Anzahl offener Positionen.
+- Neue TradingLogs speichern nach einem Buy den korrekten Cash-Snapshot.
+- Reports enthalten nun vollständige Konfiguration, Cash-/Equity-Daten und offene Positionen; Exportbuttons und zentrale UI-Felder erhielten Hover-Erklärungen.
+- Der angemeldete Benutzername bleibt in der Navigation sichtbar.
+
 ## [2.0.1] – 2026-08-20
 
 ### Render-Postgres-Verfügbarkeits-Hotfix

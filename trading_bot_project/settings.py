@@ -128,6 +128,13 @@ else:
     CSRF_COOKIE_SECURE = False
 
 LOGIN_URL = "/login/"
+# Signierte Cookie-Sessions entkoppeln Login und Passphrase vom kurzzeitig
+# nicht erreichbaren Free-Postgres. Inhalte sind signiert (nicht manipulierbar)
+# und enthalten keine Exchange-Secrets.
+SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
+SESSION_COOKIE_AGE = 60 * 60 * 12
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
 
 # ---------------------------------------------------------------------------
 # Apps / Middleware
@@ -226,6 +233,16 @@ if DATABASE_URL:
             "tcp_user_timeout": 30_000,
         }
     )
+    # Render-Private-DNS kann bei Free-Postgres-Neustarts kurz ausfallen. libpq
+    # unterstützt Hostlisten und versucht dann denselben Datastore über dessen
+    # TLS-geschützten externen Host. Explizites DATABASE_FALLBACK_HOST gewinnt.
+    primary_host = database_config.get("HOST", "")
+    fallback_host = os.environ.get("DATABASE_FALLBACK_HOST", "").strip()
+    if not fallback_host and env_bool("RENDER", False) and primary_host and "." not in primary_host:
+        render_db_region = os.environ.get("RENDER_POSTGRES_REGION", "frankfurt").strip()
+        fallback_host = f"{primary_host}.{render_db_region}-postgres.render.com"
+    if fallback_host and fallback_host != primary_host:
+        database_config["HOST"] = f"{primary_host},{fallback_host}"
     DATABASES = {"default": database_config}
 else:
     DATABASES = {

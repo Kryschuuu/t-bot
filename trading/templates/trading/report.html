@@ -60,10 +60,26 @@
     <h2>{{ config.user.username }} · {{ config.get_exchange_display }} · Konfiguration {{ config.id }}</h2>
     <p style="text-align:center;">Erstellt: {{ generated_at|date:"d.m.Y H:i:s T" }}</p>
     <div class="details">
-      <p><strong>Exchange:</strong> {{ config.exchange }}</p>
-      <p><strong>Markt:</strong> {{ config.market }}</p>
+      <p><strong>Benutzer:</strong> {{ config.user.username }}</p>
+      <p><strong>Konfigurationsname:</strong> {{ config.name }}</p>
+      <p><strong>Exchange / Markt:</strong> {{ config.get_exchange_display }} / {{ config.get_market_display }}</p>
       <p><strong>Symbole:</strong> {{ config.symbols }}</p>
+      <p><strong>Startkapital / Trade-Betrag:</strong> {{ config.start_capital }} / {{ config.trade_amount }}</p>
+      <p><strong>Take Profit / Stop Loss / Gebühr:</strong> {{ config.take_profit }} % / {{ config.stop_loss }} % / {{ config.fee }} %</p>
+      <p><strong>Kaufschwellen (Acceleration / DeltaDelta / NDA):</strong> {{ config.div_DVA_prev_NDA_threshold_buy }} / {{ config.deltadelta_threshold_buy }} / {{ config.nda_threshold_buy }}</p>
+      <p><strong>Countdown / Intervall:</strong> {{ config.countdown }} min / {{ config.time_interval }} s</p>
     </div>
+    <h3>Aktueller Kontostand</h3>
+    <table>
+      <tr><th>Verfügbarer Cash</th><th>Gebunden</th><th>Gesamtequity</th><th>Unrealisierter P/L</th></tr>
+      <tr><td>{{ available_cash }}</td><td>{{ invested_capital }}</td><td>{{ account_equity }}</td><td>{{ unrealized_profit }}</td></tr>
+    </table>
+    {% if open_positions %}
+    <h4>Offene Positionen</h4>
+    <table><tr><th>Symbol</th><th>Menge</th><th>Einstieg</th><th>Letzter Preis</th><th>Gebunden</th><th>Marktwert</th><th>Unrealisierter P/L</th></tr>
+      {% for position in open_positions %}<tr><td>{{ position.symbol }}</td><td>{{ position.amount }}</td><td>{{ position.entry_price }}</td><td>{{ position.latest_price }}</td><td>{{ position.invested }}</td><td>{{ position.market_value }}</td><td>{{ position.unrealized_pl }}</td></tr>{% endfor %}
+    </table>
+    {% endif %}
     <hr>
     <h3>Allgemeine Statistiken</h3>
     <table>

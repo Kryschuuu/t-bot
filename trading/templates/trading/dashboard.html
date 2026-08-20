@@ -22,17 +22,18 @@
         </form>
         {% endif %}
         <div class="btn-group" role="group" aria-label="Report exportieren">
-            <a class="btn btn-outline-primary" href="{% url 'generate_report' config.id %}">PDF</a>
-            <a class="btn btn-outline-primary" href="{% url 'generate_report_html' config.id %}">HTML</a>
-            <a class="btn btn-outline-primary" href="{% url 'generate_report_csv' config.id %}">CSV</a>
+            <a class="btn btn-outline-primary" title="Druckbarer Gesamtbericht mit Konfiguration, Kontostand, offenen Positionen, Statistiken, Charts und Trading-Log" href="{% url 'generate_report' config.id %}">PDF</a>
+            <a class="btn btn-outline-primary" title="Vollständiger, im Browser lesbarer Offline-Bericht inklusive eingebetteter Charts" href="{% url 'generate_report_html' config.id %}">HTML</a>
+            <a class="btn btn-outline-primary" title="Maschinenlesbarer Trading-Export aller Logzeilen für Tabellenkalkulation und weitere Analysen" href="{% url 'generate_report_csv' config.id %}">CSV</a>
         </div>
-        <button id="kill-switch" class="btn btn-danger" type="button" {% if not config.is_running %}disabled title="Bot muss laufen"{% endif %}>⚠ Alle Positionen schließen</button>
+        <button id="kill-switch" class="btn btn-danger" type="button" title="Notfallfunktion: ruft frische Kurse ab und schließt nach doppelter Bestätigung alle offenen Paper-Positionen" {% if not config.is_running %}disabled{% endif %}>⚠ Alle Positionen schließen</button>
         <form method="post" action="{% url 'reset_log' config.id %}" onsubmit="return confirm('Trading-Log und simuliertes Portfolio wirklich zurücksetzen?');">
-            {% csrf_token %}<button class="btn btn-warning" type="submit">Trading-Log zurücksetzen</button>
+            {% csrf_token %}<button class="btn btn-warning" title="Löscht die Trading-Historie und setzt das simulierte Portfolio zurück" type="submit">Trading-Log zurücksetzen</button>
         </form>
     </div>
 </div>
 <div id="bot-error" class="alert alert-danger d-none"></div>
+<div id="database-error" class="alert alert-warning d-none" role="status"></div>
 
 {% if all_configs|length > 1 %}
 <div class="mb-4">
@@ -59,9 +60,13 @@
             <div class="card-header">Portfolio</div>
             <div class="card-body p-0">
                 <table class="table table-sm mb-0">
-                    <tr><th>Startkapital</th><td>{{ config.start_capital }}</td></tr>
-                    <tr><th>Aktuelles Kapital</th><td id="current-capital">{{ current_capital }}</td></tr>
-                    <tr><th>Realisierter P/L</th><td id="tank">{{ tank }}</td></tr>
+                    <tr title="Virtuelles Kapital vor dem ersten Trade"><th>Startkapital</th><td>{{ config.start_capital }}</td></tr>
+                    <tr title="Sofort verfügbarer Cash-Bestand. Offene Positionen und Kaufgebühren sind bereits abgezogen."><th>Verfügbarer Kontostand ⓘ</th><td id="current-capital">{{ current_capital }}</td></tr>
+                    <tr title="Zum Einstieg gebundener Betrag inklusive Kaufgebühren"><th>In offenen Positionen ⓘ</th><td id="invested-capital">{{ invested_capital }}</td></tr>
+                    <tr title="Cash plus aktueller Netto-Marktwert aller offenen Positionen"><th>Gesamtequity ⓘ</th><td id="account-equity">{{ account_equity }}</td></tr>
+                    <tr title="Noch nicht realisierter Gewinn oder Verlust der offenen Positionen"><th>Unrealisierter P/L ⓘ</th><td id="unrealized-profit">{{ unrealized_profit }}</td></tr>
+                    <tr title="Summe aller abgeschlossenen Gewinne und Verluste"><th>Realisierter P/L</th><td id="tank">{{ tank }}</td></tr>
+                    <tr><th>Offene Positionen</th><td id="open-position-count">{{ open_position_count }}</td></tr>
                     <tr><th>Käufe / Verkäufe</th><td><span id="buy-orders">{{ buy_orders }}</span> / <span id="sell-orders">{{ sell_orders }}</span></td></tr>
                     <tr><th>Profitable / unprofitable Verkäufe</th><td><span id="profitable-sells">{{ profitable_sells }}</span> / <span id="unprofitable-sells">{{ unprofitable_sells }}</span></td></tr>
                 </table>
@@ -168,13 +173,47 @@
     const csrfToken = document.querySelector("input[name=csrfmiddlewaretoken]").value;
     let activeSymbol = symbols[0] || null;
     let logPage = 1;
+    let databaseRetryAt = 0;
+    let databaseBackoffMs = 10000;
+    let databaseProbeActive = false;
+
+    function databaseBackoffError() {
+        const error = new Error("Datenbank-Wiederverbindung läuft");
+        error.localBackoff = true;
+        return error;
+    }
 
     async function requestJson(url, options) {
-        const response = await fetch(url, options);
-        let data;
-        try { data = await response.json(); } catch (_) { data = {}; }
-        if (!response.ok) throw new Error(data.message || data.error || `HTTP ${response.status}`);
-        return data;
+        const now = Date.now();
+        let isRecoveryProbe = false;
+        if (databaseRetryAt) {
+            if (now < databaseRetryAt || databaseProbeActive) throw databaseBackoffError();
+            databaseProbeActive = true;
+            isRecoveryProbe = true;
+        }
+        try {
+            const response = await fetch(url, options);
+            let data;
+            try { data = await response.json(); } catch (_) { data = {}; }
+            if (response.status === 503 && data.error === "database_temporarily_unavailable") {
+                const retryHeader = Number(response.headers.get("Retry-After") || 0) * 1000;
+                databaseBackoffMs = Math.min(60000, Math.max(retryHeader, databaseBackoffMs * 2));
+                databaseRetryAt = Date.now() + databaseBackoffMs;
+                const banner = document.getElementById("database-error");
+                banner.textContent = `Datenbank kurzzeitig nicht erreichbar. Automatischer neuer Versuch in ${Math.ceil(databaseBackoffMs / 1000)} Sekunden – weitere Requests sind bis dahin pausiert.`;
+                banner.classList.remove("d-none");
+                throw databaseBackoffError();
+            }
+            if (!response.ok) throw new Error(data.message || data.error || `HTTP ${response.status}`);
+            if (databaseRetryAt) {
+                databaseRetryAt = 0;
+                databaseBackoffMs = 10000;
+                document.getElementById("database-error").classList.add("d-none");
+            }
+            return data;
+        } finally {
+            if (isRecoveryProbe) databaseProbeActive = false;
+        }
     }
 
     function setText(id, value) {
@@ -202,7 +241,7 @@
     async function updateInfo() {
         try {
             const data = await requestJson("{% url 'info_api' config.id %}");
-            ["current-capital", "tank", "buy-orders", "sell-orders", "profitable-sells", "unprofitable-sells", "win-rate", "avg-profit-trade", "avg-win", "avg-loss", "risk-reward", "profit-factor", "biggest-win", "biggest-loss", "sharpe"].forEach(id => {
+            ["current-capital", "invested-capital", "account-equity", "unrealized-profit", "open-position-count", "tank", "buy-orders", "sell-orders", "profitable-sells", "unprofitable-sells", "win-rate", "avg-profit-trade", "avg-win", "avg-loss", "risk-reward", "profit-factor", "biggest-win", "biggest-loss", "sharpe"].forEach(id => {
                 const key = id.replaceAll("-", "_").replace("current_capital", "current_capital");
                 setText(id, data[key]);
             });
