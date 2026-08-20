@@ -78,7 +78,10 @@ class Configuration(models.Model):
     api_key = models.CharField(max_length=120, blank=True, null=True)
     secret_key = models.CharField(max_length=120, blank=True, null=True)
     countdown = models.IntegerField(default=1, validators=[MinValueValidator(0)])
-    time_interval = models.IntegerField(default=2, validators=[MinValueValidator(1)])
+    time_interval = models.IntegerField(
+        default=2,
+        validators=[MinValueValidator(1), MaxValueValidator(300)],
+    )
     div_DVA_prev_NDA_threshold_buy = models.DecimalField(
         max_digits=20,
         decimal_places=8,
@@ -100,6 +103,13 @@ class Configuration(models.Model):
 
 
 class ErrorLog(models.Model):
+    SEVERITY_CHOICES = (
+        ("info", "Info"),
+        ("warning", "Warnung"),
+        ("error", "Fehler"),
+        ("critical", "Kritisch"),
+    )
+
     configuration = models.ForeignKey(
         Configuration,
         on_delete=models.CASCADE,
@@ -108,11 +118,16 @@ class ErrorLog(models.Model):
         blank=True,
     )
     timestamp = models.DateTimeField(auto_now_add=True)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="error")
     source = models.CharField(max_length=100)
+    exception_type = models.CharField(max_length=200, blank=True)
     message = models.TextField()
+    details = models.JSONField(default=dict, blank=True)
+    resolved = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-timestamp"]
+        indexes = [models.Index(fields=["configuration", "resolved", "-timestamp"])]
 
     def __str__(self):
         return f"{self.timestamp} [{self.source}] {self.message[:80]}"

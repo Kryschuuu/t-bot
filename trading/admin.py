@@ -122,8 +122,21 @@ class BacktestTaskAdmin(admin.ModelAdmin):
 
 @admin.register(ErrorLog)
 class ErrorLogAdmin(admin.ModelAdmin):
-    list_display = ("timestamp", "configuration", "source", "message")
-    list_filter = ("source",)
-    search_fields = ("message", "configuration__name", "configuration__user__username")
+    list_display = (
+        "timestamp",
+        "configuration",
+        "severity",
+        "source",
+        "exception_type",
+        "resolved",
+        "message",
+    )
+    list_filter = ("severity", "resolved", "source")
+    search_fields = (
+        "message",
+        "exception_type",
+        "configuration__name",
+        "configuration__user__username",
+    )
     ordering = ("-timestamp",)
-    readonly_fields = ("timestamp",)
+    readonly_fields = ("timestamp", "details")

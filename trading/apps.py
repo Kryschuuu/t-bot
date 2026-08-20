@@ -62,8 +62,11 @@ class TradingConfig(AppConfig):
                     logger.exception("Autostart für Konfiguration %s fehlgeschlagen", config.id)
                     ErrorLog.objects.create(
                         configuration=config,
+                        severity="critical",
                         source="apps.autostart",
+                        exception_type=type(exc).__name__,
                         message=str(exc)[:4000],
+                        details={"exchange": config.exchange, "market": config.market},
                     )
         except Exception:
             logger.exception("Aktive Bots konnten beim Prozessstart nicht geladen werden")

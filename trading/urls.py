@@ -49,4 +49,9 @@ urlpatterns = [
     ),
     path("analyse/", views.analyse_view, name="analyse"),
     path("errors/", views.error_log_view, name="error_log"),
+    path(
+        "errors/<int:error_id>/resolve/",
+        views.error_log_resolve,
+        name="error_log_resolve",
+    ),
 ]

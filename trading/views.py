@@ -13,6 +13,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
 from django.db.models import Sum
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -30,6 +31,7 @@ from .forms import (
     LoginForm,
     RegistrationForm,
 )
+from .market_data import MarketDataError, SymbolValidationError, validate_exchange_symbols
 from .models import BacktestTask, Configuration, ErrorLog
 from .tasks import dispatch_task, local_task_is_active, run_backtest
 from .trading_bot import bot_manager
@@ -212,13 +214,38 @@ def config_edit_view(request, config_id):
 def config_activate(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
     try:
+        validate_exchange_symbols(config.exchange, config.market, _symbols(config))
+    except (SymbolValidationError, MarketDataError, ValueError) as exc:
+        logger.warning("Konfigurationsprüfung für %s fehlgeschlagen: %s", config.id, exc)
+        ErrorLog.objects.create(
+            configuration=config,
+            severity="warning",
+            source="views.config_activate.validation",
+            exception_type=type(exc).__name__,
+            message=str(exc)[:4000],
+            details={
+                "exchange": config.exchange,
+                "market": config.market,
+                "symbols": _symbols(config),
+            },
+        )
+        messages.error(request, f"Bot nicht gestartet: {exc}")
+        return redirect("config_list")
+    try:
         bot_manager.start_bot(config)
     except Exception as exc:
         logger.exception("Bot-Start für Konfiguration %s fehlgeschlagen", config.id)
         ErrorLog.objects.create(
             configuration=config,
+            severity="critical",
             source="views.config_activate",
+            exception_type=type(exc).__name__,
             message=str(exc)[:4000],
+            details={
+                "exchange": config.exchange,
+                "market": config.market,
+                "symbols": _symbols(config),
+            },
         )
         messages.error(request, f"Bot konnte nicht gestartet werden: {exc}")
     else:
@@ -467,8 +494,11 @@ def bot_status_api(request):
             logger.exception("Automatischer Neustart für %s fehlgeschlagen", config.id)
             ErrorLog.objects.create(
                 configuration=config,
+                severity="critical",
                 source="views.bot_status_api",
+                exception_type=type(exc).__name__,
                 message=str(exc)[:4000],
+                details={"exchange": config.exchange, "market": config.market},
             )
             config.is_running = False
             config.save(update_fields=["is_running"])
@@ -523,8 +553,11 @@ def manual_sell_view(request, config_id):
         logger.exception("Manueller Verkauf für %s/%s fehlgeschlagen", config.id, symbol)
         ErrorLog.objects.create(
             configuration=config,
+            severity="critical",
             source="views.manual_sell",
+            exception_type=type(exc).__name__,
             message=str(exc)[:4000],
+            details={"symbol": symbol, "exchange": config.exchange},
         )
         return JsonResponse(
             {"status": "error", "message": "Verkauf fehlgeschlagen."},
@@ -533,11 +566,56 @@ def manual_sell_view(request, config_id):
 
 
 @login_required
+@require_GET
 def error_log_view(request):
-    errors = ErrorLog.objects.filter(configuration__user=request.user).select_related(
-        "configuration"
-    )[:300]
-    return render(request, "trading/error_log.html", {"errors": errors})
+    configs = Configuration.objects.filter(user=request.user).order_by("name")
+    base_queryset = ErrorLog.objects.filter(configuration__user=request.user)
+    queryset = base_queryset.select_related("configuration")
+
+    config_id = request.GET.get("config_id", "")
+    severity = request.GET.get("severity", "")
+    state = request.GET.get("state", "open")
+    source = request.GET.get("source", "").strip()
+    if config_id.isdigit():
+        queryset = queryset.filter(configuration_id=config_id)
+    if severity in dict(ErrorLog.SEVERITY_CHOICES):
+        queryset = queryset.filter(severity=severity)
+    if state == "open":
+        queryset = queryset.filter(resolved=False)
+    elif state == "resolved":
+        queryset = queryset.filter(resolved=True)
+    if source:
+        queryset = queryset.filter(source__icontains=source)
+
+    page = Paginator(queryset, 100).get_page(request.GET.get("page"))
+    context = {
+        "page": page,
+        "errors": page.object_list,
+        "configs": configs,
+        "severity_choices": ErrorLog.SEVERITY_CHOICES,
+        "filters": {
+            "config_id": config_id,
+            "severity": severity,
+            "state": state,
+            "source": source,
+        },
+        "total_count": base_queryset.count(),
+        "open_count": base_queryset.filter(resolved=False).count(),
+    }
+    return render(request, "trading/error_log.html", context)
+
+
+@login_required
+@require_POST
+def error_log_resolve(request, error_id):
+    error = get_object_or_404(
+        ErrorLog,
+        id=error_id,
+        configuration__user=request.user,
+    )
+    error.resolved = request.POST.get("action") != "reopen"
+    error.save(update_fields=["resolved"])
+    return redirect("error_log")
 
 
 def _figure_to_base64(figure, pyplot):

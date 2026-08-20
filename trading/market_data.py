@@ -1,10 +1,42 @@
+import asyncio
 import json
+import re
+import time
+from dataclasses import dataclass
 
+import aiohttp
+import ccxt
 import requests
+from asgiref.sync import async_to_sync
 
 
 class MarketDataError(RuntimeError):
-    pass
+    """Basisklasse für verständliche Fehler des Marktdaten-Layers."""
+
+
+class MarketDataConnectionError(MarketDataError):
+    """Die Börse war technisch nicht erreichbar oder lieferte ungültige Daten."""
+
+
+class SymbolValidationError(MarketDataError):
+    def __init__(self, exchange, symbols):
+        self.exchange = exchange
+        self.symbols = sorted(set(symbols))
+        joined = ", ".join(self.symbols)
+        super().__init__(f"Ungültige/nicht gelistete Symbole bei {exchange}: {joined}")
+
+
+@dataclass
+class RateLimitError(MarketDataError):
+    message: str
+    status_code: int | None = None
+    retry_at: float | None = None
+
+    def __str__(self):
+        if self.retry_at:
+            retry_text = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(self.retry_at))
+            return f"{self.message} (gesperrt bis {retry_text})"
+        return self.message
 
 
 def _base_symbol(symbol):
@@ -19,91 +51,279 @@ def _bitmart_symbol(symbol):
     return _base_symbol(symbol).replace("/", "_").upper()
 
 
+def _ban_timestamp(text):
+    match = re.search(r"banned\s+until\s+(\d{10,13})", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    timestamp = int(match.group(1))
+    return timestamp / 1000 if timestamp > 10_000_000_000 else float(timestamp)
+
+
 class PublicHTTPMarketData:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "t-bot-paper-trading/1.0"})
 
     def _json(self, url, **kwargs):
-        response = self.session.get(url, timeout=15, **kwargs)
+        try:
+            response = self.session.get(url, timeout=15, **kwargs)
+        except requests.RequestException as exc:
+            raise MarketDataConnectionError(f"Verbindung zu {url} fehlgeschlagen: {exc}") from exc
+
         if response.status_code in {418, 429}:
-            raise MarketDataError(
-                f"Rate-Limit {response.status_code} von {response.url}: {response.text[:300]}"
+            retry_at = _ban_timestamp(response.text)
+            retry_after = response.headers.get("Retry-After")
+            if retry_at is None and retry_after:
+                try:
+                    retry_at = time.time() + float(retry_after)
+                except ValueError:
+                    retry_at = None
+            raise RateLimitError(
+                f"Rate-Limit {response.status_code} von {response.url}: {response.text[:300]}",
+                status_code=response.status_code,
+                retry_at=retry_at,
             )
         try:
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise MarketDataError(f"Marktdaten-Anfrage fehlgeschlagen: {exc}") from exc
-        return payload
+            raise MarketDataConnectionError(f"Ungültige Antwort von {response.url}: {exc}") from exc
 
     def close(self):
         self.session.close()
 
 
-class BinancePublicMarketData(PublicHTTPMarketData):
-    """Preis-Adapter für Binances getrennten, öffentlichen Marktdaten-Endpunkt.
+class BinancePublicMarketData:
+    """Persistenter Binance-WebSocket-Stream ohne REST-Request-Weight.
 
-    Der normale api.binance.com-Endpunkt teilt auf Cloud-Plattformen häufig
-    IP-Rate-Limits mit vielen Nutzern. Ein Batch-Request ersetzt außerdem je
-    Zyklus N einzelne fetch_ticker-Aufrufe durch genau einen Request.
+    `miniTicker` sendet höchstens einmal pro Sekunde Updates. Eine Verbindung
+    enthält alle konfigurierten Symbole, sodass weder Einzel- noch Batch-REST-
+    Polling stattfindet und ein bestehender REST-IP-Ban nicht verlängert wird.
     """
 
     def __init__(self, market):
-        super().__init__()
         self.market = market
-        self.base_url = (
-            "https://fapi.binance.com/fapi/v1"
-            if market == "futures"
-            else "https://data-api.binance.vision/api/v3"
-        )
+        self._session = None
+        self._websocket = None
+        self._stream_key = None
+        self._latest = {}
+        self._symbol_by_compact = {}
 
-    def fetch_tickers(self, symbols):
-        compact_to_symbol = {_compact_symbol(symbol): symbol for symbol in symbols}
-        params = {}
-        if self.market == "spot":
-            params["symbols"] = json.dumps(
-                list(compact_to_symbol),
-                separators=(",", ":"),
+    @property
+    def websocket_base_url(self):
+        if self.market == "futures":
+            return "wss://fstream.binance.com/stream"
+        return "wss://stream.binance.com:443/stream"
+
+    async def _disconnect(self):
+        if self._websocket is not None:
+            await self._websocket.close()
+            self._websocket = None
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def _connect(self, symbols):
+        compact_symbols = tuple(sorted(_compact_symbol(symbol) for symbol in symbols))
+        if (
+            self._websocket is not None
+            and not self._websocket.closed
+            and compact_symbols == self._stream_key
+        ):
+            return
+        await self._disconnect()
+        self._stream_key = compact_symbols
+        self._symbol_by_compact = {_compact_symbol(symbol): symbol for symbol in symbols}
+        streams = "/".join(f"{symbol.lower()}@miniTicker" for symbol in compact_symbols)
+        timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=30)
+        self._session = aiohttp.ClientSession(timeout=timeout)
+        try:
+            self._websocket = await self._session.ws_connect(
+                self.websocket_base_url,
+                params={"streams": streams},
+                heartbeat=20,
+                autoping=True,
+                max_msg_size=1_000_000,
             )
-        payload = self._json(f"{self.base_url}/ticker/price", params=params)
-        if isinstance(payload, dict):
-            payload = [payload]
-        prices = {}
-        for row in payload:
-            original = compact_to_symbol.get(str(row.get("symbol", "")).upper())
-            if original and row.get("price") is not None:
-                prices[original] = {"last": row["price"]}
-        return prices
+        except Exception as exc:
+            await self._disconnect()
+            raise MarketDataConnectionError(
+                f"Binance-WebSocket-Verbindung fehlgeschlagen: {exc}"
+            ) from exc
+
+    def _consume_message(self, message):
+        if message.type != aiohttp.WSMsgType.TEXT:
+            if message.type in {
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.CLOSE,
+                aiohttp.WSMsgType.ERROR,
+            }:
+                raise MarketDataConnectionError("Binance-WebSocket wurde geschlossen")
+            return False
+        try:
+            payload = json.loads(message.data)
+            data = payload.get("data", payload)
+            compact = str(data["s"]).upper()
+            price = data.get("c")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MarketDataConnectionError(
+                f"Ungültige Binance-WebSocket-Nachricht: {exc}"
+            ) from exc
+        original = self._symbol_by_compact.get(compact)
+        if original and price is not None:
+            self._latest[original] = {"last": price}
+            return True
+        return False
+
+    async def fetch_tickers_async(self, symbols, timeout_seconds=12):
+        await self._connect(symbols)
+        required = set(symbols)
+        received_update = False
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            timeout = min(2, max(0.05, deadline - asyncio.get_running_loop().time()))
+            try:
+                message = await asyncio.wait_for(self._websocket.receive(), timeout=timeout)
+            except TimeoutError:
+                if required.issubset(self._latest) and received_update:
+                    break
+                continue
+            received_update = self._consume_message(message) or received_update
+            if required.issubset(self._latest) and received_update:
+                break
+
+        missing = required.difference(self._latest)
+        if missing:
+            raise SymbolValidationError("Binance", missing)
+        if not received_update:
+            raise MarketDataConnectionError("Keine aktuellen Daten vom Binance-WebSocket empfangen")
+
+        # Während des konfigurierten Abfrageintervalls läuft der Stream weiter.
+        # Alle bereits gepufferten Nachrichten konsumieren, damit sich bei
+        # mehreren Symbolen kein stetig wachsender Rückstau bildet.
+        for _ in range(10_000):
+            try:
+                message = await asyncio.wait_for(self._websocket.receive(), timeout=0.01)
+            except TimeoutError:
+                break
+            self._consume_message(message)
+        return {symbol: self._latest[symbol].copy() for symbol in symbols}
+
+    async def validate_symbols_async(self, symbols):
+        try:
+            await self.fetch_tickers_async(symbols, timeout_seconds=10)
+        finally:
+            await self.close()
+        return []
+
+    async def close(self):
+        await self._disconnect()
 
 
 class BitMartPublicMarketData(PublicHTTPMarketData):
     """Ersatz für den in CCXT 4.5 entfernten BitMart-Adapter (Spot-Marktdaten)."""
 
-    base_url = "https://api-cloud.bitmart.com/spot/quotation/v3/ticker"
+    ticker_url = "https://api-cloud.bitmart.com/spot/quotation/v3/ticker"
+    symbols_url = "https://api-cloud.bitmart.com/spot/v1/symbols"
 
     def __init__(self, market):
         if market != "spot":
             raise ValueError(
-                "BitMart Futures wird vom aktuellen Marktdaten-Adapter nicht unterstützt; "
-                "bitte Spot oder eine andere Exchange wählen."
+                "BitMart Futures wird nicht unterstützt; bitte Spot oder eine andere Exchange wählen."
             )
         super().__init__()
+        self._available_symbols = None
+
+    def available_symbols(self):
+        if self._available_symbols is not None:
+            return self._available_symbols
+        payload = self._json(self.symbols_url)
+        if payload.get("code") != 1000:
+            raise MarketDataConnectionError(
+                f"BitMart-Symbolliste fehlgeschlagen ({payload.get('code')}): "
+                f"{payload.get('message', payload)}"
+            )
+        raw_symbols = (payload.get("data") or {}).get("symbols") or []
+        symbols = set()
+        for item in raw_symbols:
+            raw = item.get("symbol") if isinstance(item, dict) else item
+            if raw:
+                symbols.add(str(raw).upper())
+        if not symbols:
+            raise MarketDataConnectionError("BitMart lieferte eine leere Symbolliste")
+        self._available_symbols = symbols
+        return symbols
+
+    def validate_symbols(self, symbols):
+        available = self.available_symbols()
+        invalid = [symbol for symbol in symbols if _bitmart_symbol(symbol) not in available]
+        if invalid:
+            raise SymbolValidationError("BitMart", invalid)
+        return []
 
     def fetch_tickers(self, symbols):
+        self.validate_symbols(symbols)
         prices = {}
         for symbol in symbols:
-            payload = self._json(
-                self.base_url,
-                params={"symbol": _bitmart_symbol(symbol)},
-            )
+            payload = self._json(self.ticker_url, params={"symbol": _bitmart_symbol(symbol)})
             if payload.get("code") != 1000:
                 raise MarketDataError(
-                    f"BitMart-Fehler {payload.get('code')}: {payload.get('message', payload)}"
+                    f"BitMart-Fehler für {symbol} ({_bitmart_symbol(symbol)}), "
+                    f"Code {payload.get('code')}: {payload.get('message', payload)}"
                 )
             data = payload.get("data") or {}
             last = data.get("last") or data.get("last_price")
             if last is None:
-                raise MarketDataError(f"BitMart lieferte keinen Preis für {symbol}")
+                raise MarketDataConnectionError(f"BitMart lieferte keinen Preis für {symbol}")
             prices[symbol] = {"last": last}
         return prices
+
+
+def validate_exchange_symbols(exchange_id, market, symbols):
+    """Validiert normalisierte CCXT-Symbole gegen die aktuell gelisteten Märkte."""
+    exchange_id = exchange_id.strip().lower()
+    if exchange_id == "binance":
+        provider = BinancePublicMarketData(market)
+        async_to_sync(provider.validate_symbols_async)(symbols)
+        return
+    if exchange_id == "bitmart":
+        provider = BitMartPublicMarketData(market)
+        try:
+            provider.validate_symbols(symbols)
+        finally:
+            provider.close()
+        return
+
+    exchange_class = getattr(ccxt, exchange_id, None)
+    if exchange_class is None:
+        raise MarketDataError(f"Exchange-Adapter nicht verfügbar: {exchange_id}")
+    default_type = "swap" if market == "futures" else "spot"
+    exchange = exchange_class(
+        {
+            "enableRateLimit": True,
+            "timeout": 15_000,
+            "options": {"defaultType": default_type},
+        }
+    )
+    try:
+        markets = exchange.load_markets()
+        invalid = []
+        for symbol in symbols:
+            market_info = markets.get(symbol)
+            expected_type = market_info and (
+                market_info.get("spot") if market == "spot" else market_info.get("swap")
+            )
+            if not market_info or not expected_type or market_info.get("active") is False:
+                invalid.append(symbol)
+        if invalid:
+            raise SymbolValidationError(exchange.name, invalid)
+    except SymbolValidationError:
+        raise
+    except (ccxt.BaseError, OSError, ValueError) as exc:
+        raise MarketDataConnectionError(
+            f"Symbole konnten bei {exchange.name} nicht geprüft werden: {exc}"
+        ) from exc
+    finally:
+        close_method = getattr(exchange, "close", None)
+        if close_method:
+            close_method()

@@ -6,6 +6,7 @@ from django.contrib.auth import password_validation
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+from .market_data import MarketDataError, SymbolValidationError, validate_exchange_symbols
 from .models import Configuration
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9._-]+/[A-Z0-9._:-]+$")
@@ -113,6 +114,12 @@ class ConfigurationForm(forms.ModelForm):
             self.fields["api_key"].widget.attrs["placeholder"] = "Unverändert lassen"
             self.fields["secret_key"].widget.attrs["placeholder"] = "Unverändert lassen"
 
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+        if len(name) < 3:
+            raise forms.ValidationError("Der Name muss mindestens 3 Zeichen lang sein.")
+        return name
+
     def clean_symbols(self):
         raw_symbols = self.cleaned_data["symbols"]
         symbols = []
@@ -128,6 +135,8 @@ class ConfigurationForm(forms.ModelForm):
                 symbols.append(symbol)
         if not symbols:
             raise forms.ValidationError("Mindestens ein Handelspaar ist erforderlich.")
+        if len(symbols) > 20:
+            raise forms.ValidationError("Maximal 20 Handelspaare pro Konfiguration sind erlaubt.")
         normalized = ",".join(symbols)
         if len(normalized) > Configuration._meta.get_field("symbols").max_length:
             raise forms.ValidationError("Die Symbolliste ist zu lang.")
@@ -150,12 +159,53 @@ class ConfigurationForm(forms.ModelForm):
         start_capital = cleaned_data.get("start_capital")
         trade_amount = cleaned_data.get("trade_amount")
         fee = cleaned_data.get("fee")
+        api_key = cleaned_data.get("api_key")
+        secret_key = cleaned_data.get("secret_key")
+        interval = cleaned_data.get("time_interval")
+        countdown = cleaned_data.get("countdown")
+        loss_threshold = cleaned_data.get("sales_stop_threshold")
+
         if start_capital is not None and trade_amount is not None:
             fee_factor = 1 + ((fee or 0) / 100)
             if trade_amount * fee_factor > start_capital:
                 self.add_error(
                     "trade_amount",
                     "Trade-Betrag einschließlich Kaufgebühr darf das Startkapital nicht überschreiten.",
+                )
+        if fee is not None and fee > 5:
+            self.add_error("fee", "Eine simulierte Gebühr über 5 % ist nicht plausibel.")
+        if bool(api_key) != bool(secret_key):
+            message = "API-Key und Secret-Key müssen entweder beide gesetzt oder beide leer sein."
+            self.add_error("api_key", message)
+            self.add_error("secret_key", message)
+        if interval is not None and interval > 300:
+            self.add_error(
+                "time_interval", "Das Zeitintervall darf höchstens 300 Sekunden betragen."
+            )
+        if countdown is not None and countdown > 10_080:
+            self.add_error("countdown", "Der Countdown darf höchstens 7 Tage betragen.")
+        if loss_threshold is not None and 0 < loss_threshold < 0.1:
+            self.add_error(
+                "sales_stop_threshold",
+                "Die Gesamtverlustgrenze muss 0 (deaktiviert) oder mindestens 0,1 % sein.",
+            )
+
+        exchange = cleaned_data.get("exchange")
+        market = cleaned_data.get("market")
+        symbols_value = cleaned_data.get("symbols")
+        validation_fields = ("exchange", "market", "symbols")
+        validation_blocked = any(field in self.errors for field in validation_fields)
+        if exchange and market and symbols_value and not validation_blocked:
+            symbols = [symbol for symbol in symbols_value.split(",") if symbol]
+            try:
+                validate_exchange_symbols(exchange, market, symbols)
+            except SymbolValidationError as exc:
+                self.add_error("symbols", str(exc))
+            except (MarketDataError, ValueError) as exc:
+                self.add_error(
+                    None,
+                    f"Die Exchange-Konfiguration konnte nicht verifiziert werden: {exc}. "
+                    "Bitte Verbindung, Exchange, Markt und Symbole prüfen und erneut speichern.",
                 )
         return cleaned_data
 

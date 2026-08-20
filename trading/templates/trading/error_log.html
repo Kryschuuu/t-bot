@@ -1,37 +1,78 @@
 {% extends "trading/base.html" %}
+{% block title %}Fehler-Log · Trading Bot{% endblock %}
 {% block content %}
-<div class="container mt-4">
-  <h2>Exception-Log</h2>
-  <p class="text-muted">
-    Persistente Fehler-Historie aus der Datenbank (unabhängig von Render's
-    kurzlebigen Server-Logs). Zeigt die letzten 300 Einträge über alle
-    eigenen Konfigurationen.
-  </p>
-  <a href="{% url 'dashboard' %}" class="btn btn-secondary mb-3">← Zurück zum Dashboard</a>
-
-  {% if not errors %}
-    <div class="alert alert-success">Keine Fehler protokolliert. 🎉</div>
-  {% else %}
-  <table class="table table-sm table-striped">
-    <thead>
-      <tr>
-        <th>Zeitpunkt</th>
-        <th>Konfiguration</th>
-        <th>Quelle</th>
-        <th>Meldung</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for e in errors %}
-      <tr>
-        <td class="text-nowrap">{{ e.timestamp }}</td>
-        <td>{{ e.configuration_id|default:"–" }}</td>
-        <td><code>{{ e.source }}</code></td>
-        <td style="white-space: pre-wrap; word-break: break-word;">{{ e.message }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <div>
+    <h1 class="h2 mb-1">Fehler-Log</h1>
+    <span class="badge bg-danger">{{ open_count }} offen</span>
+    <span class="badge bg-secondary">{{ total_count }} gesamt</span>
+  </div>
+  <a href="{% url 'dashboard' %}" class="btn btn-outline-secondary">Zum Dashboard</a>
 </div>
+
+<form method="get" class="card card-body mb-3">
+  <div class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label" for="config_id">Konfiguration</label>
+      <select class="form-select" id="config_id" name="config_id">
+        <option value="">Alle</option>
+        {% for config in configs %}<option value="{{ config.id }}" {% if filters.config_id == config.id|stringformat:'s' %}selected{% endif %}>{{ config.name }} (#{{ config.id }})</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label" for="severity">Schweregrad</label>
+      <select class="form-select" id="severity" name="severity">
+        <option value="">Alle</option>
+        {% for value, label in severity_choices %}<option value="{{ value }}" {% if filters.severity == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label" for="state">Status</label>
+      <select class="form-select" id="state" name="state">
+        <option value="open" {% if filters.state == 'open' %}selected{% endif %}>Offen</option>
+        <option value="resolved" {% if filters.state == 'resolved' %}selected{% endif %}>Erledigt</option>
+        <option value="all" {% if filters.state == 'all' %}selected{% endif %}>Alle</option>
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="source">Quelle enthält</label>
+      <input class="form-control" id="source" name="source" value="{{ filters.source }}" placeholder="z. B. fetch_tickers">
+    </div>
+    <div class="col-md-2"><button class="btn btn-primary w-100" type="submit">Filtern</button></div>
+  </div>
+</form>
+
+{% if not errors %}
+<div class="alert alert-success">Für diesen Filter gibt es keine Fehler.</div>
+{% else %}
+<div class="table-responsive">
+<table class="table table-sm table-striped align-middle">
+  <thead><tr><th>Zeitpunkt</th><th>Konfiguration</th><th>Schweregrad</th><th>Quelle / Typ</th><th>Meldung und Details</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for error in errors %}
+    <tr class="{% if error.resolved %}text-muted{% elif error.severity == 'critical' %}table-danger{% elif error.severity == 'warning' %}table-warning{% endif %}">
+      <td class="text-nowrap">{{ error.timestamp|date:"d.m.Y H:i:s" }}</td>
+      <td>{{ error.configuration.name|default:"–" }}{% if error.configuration_id %}<br><small>#{{ error.configuration_id }}</small>{% endif %}</td>
+      <td><span class="badge {% if error.severity == 'critical' %}bg-danger{% elif error.severity == 'warning' %}bg-warning text-dark{% elif error.severity == 'info' %}bg-info text-dark{% else %}bg-secondary{% endif %}">{{ error.get_severity_display }}</span></td>
+      <td><code>{{ error.source }}</code>{% if error.exception_type %}<br><small>{{ error.exception_type }}</small>{% endif %}</td>
+      <td style="min-width:24rem; white-space:pre-wrap; word-break:break-word;">{{ error.message }}{% if error.details %}<details class="mt-1"><summary>Technische Details</summary><pre class="small bg-light border rounded p-2 mt-1">{{ error.details }}</pre></details>{% endif %}</td>
+      <td>
+        <form method="post" action="{% url 'error_log_resolve' error.id %}">
+          {% csrf_token %}
+          {% if error.resolved %}<button class="btn btn-sm btn-outline-secondary" name="action" value="reopen">Wieder öffnen</button>{% else %}<button class="btn btn-sm btn-outline-success" name="action" value="resolve">Erledigt</button>{% endif %}
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<nav aria-label="Fehlerseiten">
+  <ul class="pagination justify-content-center">
+    {% if page.has_previous %}<li class="page-item"><a class="page-link" href="?page={{ page.previous_page_number }}&config_id={{ filters.config_id|urlencode }}&severity={{ filters.severity|urlencode }}&state={{ filters.state|urlencode }}&source={{ filters.source|urlencode }}">Zurück</a></li>{% endif %}
+    <li class="page-item disabled"><span class="page-link">Seite {{ page.number }} von {{ page.paginator.num_pages }}</span></li>
+    {% if page.has_next %}<li class="page-item"><a class="page-link" href="?page={{ page.next_page_number }}&config_id={{ filters.config_id|urlencode }}&severity={{ filters.severity|urlencode }}&state={{ filters.state|urlencode }}&source={{ filters.source|urlencode }}">Weiter</a></li>{% endif %}
+  </ul>
+</nav>
+{% endif %}
 {% endblock %}

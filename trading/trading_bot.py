@@ -21,7 +21,12 @@ from django.db import (
 )
 from django.db.utils import InterfaceError
 
-from .market_data import BinancePublicMarketData, BitMartPublicMarketData
+from .market_data import (
+    BinancePublicMarketData,
+    BitMartPublicMarketData,
+    RateLimitError,
+    SymbolValidationError,
+)
 from .models import Configuration, DataLog, ErrorLog, TradingLog
 
 logger = logging.getLogger("trading")
@@ -80,6 +85,12 @@ def db_get_config(config_id):
 
 @sync_to_async(thread_sensitive=False)
 @db_safe(suppress=True)
+def db_mark_bot_stopped(config_id):
+    Configuration.objects.filter(id=config_id).update(is_running=False)
+
+
+@sync_to_async(thread_sensitive=False)
+@db_safe(suppress=True)
 def db_create_datalog_safe(**kwargs):
     try:
         with transaction.atomic():
@@ -115,12 +126,22 @@ def db_create_tradinglog_safe(**kwargs):
 
 @sync_to_async(thread_sensitive=False)
 @db_safe(suppress=True)
-def db_log_error(config_id, source, message):
+def db_log_error(
+    config_id,
+    source,
+    message,
+    severity="error",
+    exception_type="",
+    details=None,
+):
     try:
         ErrorLog.objects.create(
             configuration_id=config_id,
+            severity=severity,
             source=source[:100],
+            exception_type=exception_type[:200],
             message=str(message)[:4000],
+            details=details or {},
         )
     except (InterfaceError, OperationalError):
         raise
@@ -255,14 +276,21 @@ class TradingBot(threading.Thread):
     def stop(self):
         self.running = False
 
-    async def _persist_error(self, key, source, message):
+    async def _persist_error(self, key, source, error, severity="error", details=None):
         now = time.time()
-        text = str(message)
+        text = str(error)
         previous_time, previous_text = self._persisted_errors.get(key, (0, None))
         # Identische Dauerfehler (z. B. eine regional blockierte Exchange)
         # höchstens alle 15 Minuten persistieren, damit die DB nicht vollläuft.
         if text != previous_text or now - previous_time >= 15 * 60:
-            await db_log_error(self.config_id, source, text)
+            await db_log_error(
+                self.config_id,
+                source,
+                text,
+                severity=severity,
+                exception_type=type(error).__name__ if isinstance(error, BaseException) else "",
+                details=details,
+            )
             self._persisted_errors[key] = (now, text)
 
     async def _sleep(self, seconds):
@@ -281,12 +309,32 @@ class TradingBot(threading.Thread):
                     tickers = await self.fetch_tickers(self.symbols)
                 except Exception as exc:
                     text = str(exc)
-                    rate_limited = "418" in text or "429" in text or "rate" in text.lower()
-                    if rate_limited:
-                        self._rate_limit_delay = min(
-                            15 * 60,
-                            max(30, self._rate_limit_delay * 2),
+                    if isinstance(exc, SymbolValidationError):
+                        self.last_error = f"Konfiguration ungültig: {text}"
+                        self.last_error_at = time.time()
+                        await self._persist_error(
+                            "invalid_symbols",
+                            "trading_bot.validate_symbols",
+                            exc,
+                            severity="critical",
+                            details={
+                                "exchange": self.config.exchange,
+                                "market": self.config.market,
+                                "invalid_symbols": exc.symbols,
+                            },
                         )
+                        await db_mark_bot_stopped(self.config_id)
+                        self.running = False
+                        continue
+                    if isinstance(exc, RateLimitError):
+                        if exc.retry_at and exc.retry_at > time.time():
+                            # Den von der Börse genannten Ban vollständig abwarten.
+                            self._rate_limit_delay = max(1, exc.retry_at - time.time() + 1)
+                        else:
+                            self._rate_limit_delay = min(
+                                15 * 60,
+                                max(30, self._rate_limit_delay * 2),
+                            )
                     else:
                         self._rate_limit_delay = 2
                     self.last_error = f"Marktdaten: {text}"
@@ -300,7 +348,15 @@ class TradingBot(threading.Thread):
                     await self._persist_error(
                         "market_data",
                         "trading_bot.fetch_tickers",
-                        text,
+                        exc,
+                        severity="warning" if isinstance(exc, RateLimitError) else "error",
+                        details={
+                            "exchange": self.config.exchange,
+                            "market": self.config.market,
+                            "symbols": self.symbols,
+                            "retry_delay_seconds": round(self._rate_limit_delay, 2),
+                            "retry_at": exc.retry_at if isinstance(exc, RateLimitError) else None,
+                        },
                     )
                     await self._sleep(self._rate_limit_delay)
                     continue
@@ -321,7 +377,12 @@ class TradingBot(threading.Thread):
                         await self._persist_error(
                             f"symbol:{symbol}",
                             "trading_bot.process_symbol",
-                            f"{symbol}: {exc}",
+                            exc,
+                            details={
+                                "exchange": self.config.exchange,
+                                "market": self.config.market,
+                                "symbol": symbol,
+                            },
                         )
                 if any_success:
                     self.last_success_at = time.time()
@@ -338,6 +399,10 @@ class TradingBot(threading.Thread):
                 await self._sleep(2)
 
     async def fetch_tickers(self, symbols):
+        fetch_many_async = getattr(self.exchange, "fetch_tickers_async", None)
+        if fetch_many_async:
+            return await asyncio.wait_for(fetch_many_async(symbols), timeout=30)
+
         fetch_many = getattr(self.exchange, "fetch_tickers", None)
         if fetch_many:
             future = self.loop.run_in_executor(None, fetch_many, symbols)
@@ -574,8 +639,11 @@ class TradingBotManager:
                 logger.exception("Neustart für Konfiguration %s fehlgeschlagen", config.id)
                 ErrorLog.objects.create(
                     configuration_id=config.id,
+                    severity="critical",
                     source="trading_bot.restart",
+                    exception_type=type(exc).__name__,
                     message=str(exc)[:4000],
+                    details={"exchange": config.exchange, "market": config.market},
                 )
             finally:
                 close_old_connections()

@@ -1,5 +1,9 @@
+import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import aiohttp
 from asgiref.sync import async_to_sync
 from django.contrib.auth.models import User
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -7,8 +11,12 @@ from django.urls import reverse
 
 from trading.backtesting import Backtesting
 from trading.forms import BacktestForm, ConfigurationForm
-from trading.market_data import BinancePublicMarketData, BitMartPublicMarketData
-from trading.models import BacktestTask, Configuration, DataLog, TradingLog
+from trading.market_data import (
+    BinancePublicMarketData,
+    BitMartPublicMarketData,
+    SymbolValidationError,
+)
+from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 from trading.tasks import run_backtest
 from trading.trading_bot import TradingBot
 
@@ -38,6 +46,9 @@ class BacktestingTests(TestCase):
 class FormTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("form-user", password="a-secure-test-pass")
+        validator = patch("trading.forms.validate_exchange_symbols")
+        self.validate_exchange_symbols = validator.start()
+        self.addCleanup(validator.stop)
 
     def configuration_data(self, **overrides):
         data = {
@@ -74,6 +85,15 @@ class FormTests(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn("trade_amount", form.errors)
 
+    def test_configuration_reports_exchange_specific_invalid_symbols(self):
+        self.validate_exchange_symbols.side_effect = SymbolValidationError(
+            "BitMart", ["KAITO/USDT"]
+        )
+        form = ConfigurationForm(self.configuration_data(exchange="bitmart", symbols="KAITO/USDT"))
+        self.assertFalse(form.is_valid())
+        self.assertIn("KAITO/USDT", form.errors["symbols"][0])
+        self.assertIn("BitMart", form.errors["symbols"][0])
+
     def test_backtest_rejects_zero_step_and_excessive_range(self):
         data = {
             "acc_from": 0,
@@ -92,30 +112,58 @@ class FormTests(TestCase):
 
 
 class MarketDataAdapterTests(TestCase):
-    def test_binance_uses_one_batch_response_for_all_symbols(self):
+    def test_binance_uses_one_websocket_for_all_symbols(self):
         provider = BinancePublicMarketData("spot")
-        calls = []
+
+        class FakeWebSocket:
+            closed = False
+
+            def __init__(self):
+                self.messages = iter(
+                    [
+                        SimpleNamespace(
+                            type=aiohttp.WSMsgType.TEXT,
+                            data='{"data":{"s":"BTCUSDT","c":"123.45"}}',
+                        ),
+                        SimpleNamespace(
+                            type=aiohttp.WSMsgType.TEXT,
+                            data='{"data":{"s":"ETHUSDT","c":"45.67"}}',
+                        ),
+                    ]
+                )
+
+            async def receive(self):
+                try:
+                    return next(self.messages)
+                except StopIteration:
+                    await asyncio.sleep(1)
+                    return SimpleNamespace(type=aiohttp.WSMsgType.PING, data="")
+
+            async def close(self):
+                self.closed = True
+
+        async def fake_connect(symbols):
+            provider._symbol_by_compact = {
+                "BTCUSDT": "BTC/USDT",
+                "ETHUSDT": "ETH/USDT",
+            }
+            provider._websocket = FakeWebSocket()
+
+        provider._connect = fake_connect
+        result = async_to_sync(provider.fetch_tickers_async)(["BTC/USDT", "ETH/USDT"])
+        async_to_sync(provider.close)()
+        self.assertEqual(result["BTC/USDT"]["last"], "123.45")
+        self.assertEqual(result["ETH/USDT"]["last"], "45.67")
+
+    def test_bitmart_adapter_validates_then_reads_v3_ticker(self):
+        provider = BitMartPublicMarketData("spot")
 
         def fake_json(url, **kwargs):
-            calls.append((url, kwargs))
-            return [
-                {"symbol": "BTCUSDT", "price": "123.45"},
-                {"symbol": "ETHUSDT", "price": "45.67"},
-            ]
+            if url == provider.symbols_url:
+                return {"code": 1000, "data": {"symbols": ["BTC_USDT"]}}
+            return {"code": 1000, "data": {"symbol": "BTC_USDT", "last": "321.00"}}
 
         provider._json = fake_json
-        result = provider.fetch_tickers(["BTC/USDT", "ETH/USDT"])
-        provider.close()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(result["BTC/USDT"]["last"], "123.45")
-        self.assertIn("symbols", calls[0][1]["params"])
-
-    def test_bitmart_adapter_handles_current_v3_response(self):
-        provider = BitMartPublicMarketData("spot")
-        provider._json = lambda *args, **kwargs: {
-            "code": 1000,
-            "data": {"symbol": "BTC_USDT", "last": "321.00"},
-        }
         result = provider.fetch_tickers(["BTC/USDT"])
         provider.close()
         self.assertEqual(result["BTC/USDT"]["last"], "321.00")
@@ -172,6 +220,35 @@ class ViewSecurityTests(TestCase):
             {"config_id": self.config.id, "symbol": "ETH/USDT"},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_error_log_is_owner_scoped_and_can_resolve_entries(self):
+        own_error = ErrorLog.objects.create(
+            configuration=self.config,
+            severity="warning",
+            source="test.source",
+            exception_type="TestError",
+            message="Eigener Fehler",
+            details={"symbol": "BTC/USDT"},
+        )
+        foreign_config = Configuration.objects.create(
+            user=self.other,
+            name="Foreign errors",
+            symbols="BTC/USDT",
+        )
+        foreign_error = ErrorLog.objects.create(
+            configuration=foreign_config,
+            source="foreign",
+            message="Fremder Fehler",
+        )
+        response = self.client.get(reverse("error_log"))
+        self.assertContains(response, "Eigener Fehler")
+        self.assertNotContains(response, "Fremder Fehler")
+        response = self.client.post(reverse("error_log_resolve", args=[own_error.id]))
+        self.assertRedirects(response, reverse("error_log"))
+        own_error.refresh_from_db()
+        self.assertTrue(own_error.resolved)
+        response = self.client.post(reverse("error_log_resolve", args=[foreign_error.id]))
+        self.assertEqual(response.status_code, 404)
 
 
 class GateTests(TestCase):
