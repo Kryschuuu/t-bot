@@ -1,8 +1,63 @@
+import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
+from django.db import OperationalError, close_old_connections
+from django.db.utils import InterfaceError
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
+
+logger = logging.getLogger("trading")
+
+
+def database_unavailable_response(request):
+    close_old_connections()
+    if request.path.startswith("/api/"):
+        response = JsonResponse(
+            {
+                "error": "database_temporarily_unavailable",
+                "message": "Die Datenbank ist vorübergehend nicht erreichbar. Bitte erneut versuchen.",
+            },
+            status=503,
+        )
+    else:
+        response = HttpResponse(
+            """<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Datenbank vorübergehend nicht erreichbar</title>
+<style>body{font-family:system-ui;background:#f8f9fa;margin:0;padding:3rem;color:#212529}
+main{max-width:42rem;margin:auto;background:white;padding:2rem;border-radius:.75rem;
+box-shadow:0 2px 12px #0002}h1{color:#b02a37}button{padding:.6rem 1rem}</style></head>
+<body><main><h1>Dienst vorübergehend eingeschränkt</h1>
+<p>PostgreSQL ist momentan nicht erreichbar. Der Bot versucht die Verbindung
+automatisch mit Backoff wiederherzustellen. Bitte warte kurz und lade die Seite erneut.</p>
+<button onclick="location.reload()">Erneut versuchen</button></main></body></html>""",
+            status=503,
+            content_type="text/html; charset=utf-8",
+        )
+    response["Retry-After"] = "10"
+    return response
+
+
+class DatabaseAvailabilityMiddleware:
+    """Wandelt kurzzeitige Render-Postgres-Ausfälle in klare HTTP 503 um."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        try:
+            return self.get_response(request)
+        except (OperationalError, InterfaceError) as exc:
+            logger.warning("HTTP-Anfrage wegen Datenbankausfall mit 503 beantwortet: %s", exc)
+            return database_unavailable_response(request)
+
+    def process_exception(self, request, exception):
+        if isinstance(exception, (OperationalError, InterfaceError)):
+            logger.warning("View wegen Datenbankausfall mit 503 beantwortet: %s", exception)
+            return database_unavailable_response(request)
+        return None
 
 
 class PassphraseGateMiddleware:
@@ -23,7 +78,14 @@ class PassphraseGateMiddleware:
             or request.path == health_path
             or request.path.startswith(static_url)
         )
-        if exempt or request.session.get("passphrase_verified"):
+        if exempt:
+            return self.get_response(request)
+        try:
+            verified = request.session.get("passphrase_verified")
+        except (OperationalError, InterfaceError) as exc:
+            logger.warning("Passphrase-Session wegen Datenbankausfall nicht lesbar: %s", exc)
+            return database_unavailable_response(request)
+        if verified:
             return self.get_response(request)
 
         query = urlencode({"next": request.get_full_path()})

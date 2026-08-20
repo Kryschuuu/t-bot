@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 from asgiref.sync import async_to_sync
 from django.contrib.auth.models import User
+from django.db import OperationalError
 from django.http import HttpResponse
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
 from trading.backtesting import Backtesting
@@ -20,6 +21,7 @@ from trading.market_data import (
     SymbolValidationError,
     _ban_timestamp,
 )
+from trading.middleware import DatabaseAvailabilityMiddleware
 from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 from trading.symbols import get_available_symbols
 from trading.tasks import run_backtest
@@ -222,6 +224,18 @@ class MarketDataAdapterTests(TestCase):
         result = provider.fetch_tickers(["BTC/USDT"])
         provider.close()
         self.assertEqual(result["BTC/USDT"]["last"], "65432.1")
+
+
+class DatabaseAvailabilityMiddlewareTests(TestCase):
+    def test_database_outage_returns_json_503_for_api(self):
+        def unavailable(request):
+            raise OperationalError("connection refused")
+
+        request = RequestFactory().get("/api/info/1/")
+        response = DatabaseAvailabilityMiddleware(unavailable)(request)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response["Retry-After"], "10")
+        self.assertIn("database_temporarily_unavailable", response.content.decode())
 
 
 @override_settings(PASSPHRASE_GATE_ENABLED=False, AUTOSTART_BOTS=False)

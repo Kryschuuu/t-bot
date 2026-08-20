@@ -35,57 +35,65 @@ from .models import Configuration, DataLog, ErrorLog, TradingLog
 logger = logging.getLogger("trading")
 _EIGHT_PLACES = Decimal("0.00000001")
 _MAX_DECIMAL = Decimal("999999999999.99999999")
+_DB_RECOVERY_LOCK = threading.Lock()
 
 
 def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
-    """Erneuert Thread-Verbindungen und übersteht kurze Render-DNS-Ausfälle."""
+    """Koordiniert Reconnects, damit viele Bots keinen DB-Thundering-Herd erzeugen."""
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            try:
+                close_old_connections()
+                return func(*args, **kwargs)
+            except (InterfaceError, OperationalError) as exc:
+                last_error = exc
+
             retry_limit = max_retries or settings.DB_RECONNECT_MAX_RETRIES
             initial_delay = base_delay or settings.DB_RECONNECT_BASE_DELAY
             delay_cap = max_delay or settings.DB_RECONNECT_MAX_DELAY
-            attempt = 0
-            while True:
-                try:
-                    close_old_connections()
-                    return func(*args, **kwargs)
-                except (InterfaceError, OperationalError) as exc:
-                    attempt += 1
-                    message = str(exc)
+            # Nur ein Executor-Thread probiert aktiv die Wiederherstellung.
+            # Alle anderen warten und laufen nach seiner Erholung direkt weiter.
+            with _DB_RECOVERY_LOCK:
+                for attempt in range(1, retry_limit + 1):
+                    message = str(last_error)
                     dns_failure = "could not translate host name" in message.lower()
                     try:
                         connection.close()
                     except Exception:
                         logger.debug("Defekte DB-Verbindung war bereits geschlossen")
-                    if attempt > retry_limit:
-                        logger.error(
-                            "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen "
-                            "(DNS=%s, Typ=%s): %s",
-                            func.__name__,
-                            attempt,
+                    try:
+                        close_old_connections()
+                        return func(*args, **kwargs)
+                    except (InterfaceError, OperationalError) as exc:
+                        last_error = exc
+                        if attempt >= retry_limit:
+                            break
+                        delay = min(delay_cap, initial_delay * (2 ** (attempt - 1)))
+                        if dns_failure:
+                            delay = max(5, delay)
+                        delay += random.uniform(0, delay * 0.25)
+                        logger.warning(
+                            "DB ausgefallen (DNS=%s); koordinierter Reconnect %s/%s in %.2fs: %s",
                             dns_failure,
-                            type(exc).__name__,
+                            attempt,
+                            retry_limit,
+                            delay,
                             exc,
                         )
-                        if suppress:
-                            return None
-                        raise
-                    delay = min(delay_cap, initial_delay * (2 ** (attempt - 1)))
-                    if dns_failure:
-                        delay = max(5, delay)
-                    delay += random.uniform(0, delay * 0.25)
-                    logger.warning(
-                        "DB-Verbindung in %s verloren (DNS=%s); Reconnect %s/%s in %.2fs: %s",
-                        func.__name__,
-                        dns_failure,
-                        attempt,
-                        retry_limit,
-                        delay,
-                        exc,
-                    )
-                    time.sleep(delay)
+                        time.sleep(delay)
+
+            logger.error(
+                "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen (%s): %s",
+                func.__name__,
+                retry_limit,
+                type(last_error).__name__,
+                last_error,
+            )
+            if suppress:
+                return None
+            raise last_error
 
         return wrapper
 
