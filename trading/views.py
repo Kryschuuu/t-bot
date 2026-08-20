@@ -110,7 +110,7 @@ def calculate_performance_metrics(logs):
 
 @require_GET
 def health_view(request):
-    return JsonResponse({"status": "ok"})
+    return JsonResponse({"status": "ok", "version": settings.APP_VERSION})
 
 
 def home(request):

@@ -9,6 +9,11 @@ import dj_database_url
 # Basisverzeichnis
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
+APP_VERSION = (
+    (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip()
+    if (BASE_DIR / "VERSION").exists()
+    else "dev"
+)
 
 logger = logging.getLogger(__name__)
 
