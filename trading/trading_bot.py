@@ -26,6 +26,7 @@ from .market_data import (
     BitMartPublicMarketData,
     RateLimitError,
     SymbolValidationError,
+    WebSocketReconnectError,
 )
 from .models import Configuration, DataLog, ErrorLog, TradingLog
 
@@ -34,12 +35,15 @@ _EIGHT_PLACES = Decimal("0.00000001")
 _MAX_DECIMAL = Decimal("999999999999.99999999")
 
 
-def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress=False):
-    """Erneuert veraltete Thread-Verbindungen und wiederholt Verbindungsfehler."""
+def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
+    """Erneuert Thread-Verbindungen und übersteht kurze Render-DNS-Ausfälle."""
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            retry_limit = max_retries or settings.DB_RECONNECT_MAX_RETRIES
+            initial_delay = base_delay or settings.DB_RECONNECT_BASE_DELAY
+            delay_cap = max_delay or settings.DB_RECONNECT_MAX_DELAY
             attempt = 0
             while True:
                 try:
@@ -47,28 +51,37 @@ def db_safe(max_retries=5, base_delay=0.5, max_delay=8.0, suppress=False):
                     return func(*args, **kwargs)
                 except (InterfaceError, OperationalError) as exc:
                     attempt += 1
+                    message = str(exc)
+                    dns_failure = "could not translate host name" in message.lower()
                     try:
                         connection.close()
                     except Exception:
                         logger.debug("Defekte DB-Verbindung war bereits geschlossen")
-                    if attempt > max_retries:
+                    if attempt > retry_limit:
                         logger.error(
-                            "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen: %s",
+                            "DB-Reconnect in %s nach %s Versuchen fehlgeschlagen "
+                            "(DNS=%s, Typ=%s): %s",
                             func.__name__,
                             attempt,
+                            dns_failure,
+                            type(exc).__name__,
                             exc,
                         )
                         if suppress:
                             return None
                         raise
-                    delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+                    delay = min(delay_cap, initial_delay * (2 ** (attempt - 1)))
+                    if dns_failure:
+                        delay = max(5, delay)
                     delay += random.uniform(0, delay * 0.25)
                     logger.warning(
-                        "DB-Verbindung in %s verloren; neuer Versuch %s/%s in %.2fs",
+                        "DB-Verbindung in %s verloren (DNS=%s); Reconnect %s/%s in %.2fs: %s",
                         func.__name__,
+                        dns_failure,
                         attempt,
-                        max_retries,
+                        retry_limit,
                         delay,
+                        exc,
                     )
                     time.sleep(delay)
 
@@ -356,6 +369,12 @@ class TradingBot(threading.Thread):
                             "symbols": self.symbols,
                             "retry_delay_seconds": round(self._rate_limit_delay, 2),
                             "retry_at": exc.retry_at if isinstance(exc, RateLimitError) else None,
+                            "reconnect_attempts": (
+                                exc.attempts if isinstance(exc, WebSocketReconnectError) else None
+                            ),
+                            "last_connection_error": (
+                                exc.last_error if isinstance(exc, WebSocketReconnectError) else None
+                            ),
                         },
                     )
                     await self._sleep(self._rate_limit_delay)
@@ -386,6 +405,8 @@ class TradingBot(threading.Thread):
                         )
                 if any_success:
                     self.last_success_at = time.time()
+                    self.last_error = None
+                    self.last_error_at = None
                     self._rate_limit_delay = 0
                 await self._sleep(max(1, self.config.time_interval))
             except ObjectDoesNotExist:
@@ -395,13 +416,19 @@ class TradingBot(threading.Thread):
                 logger.exception("Main-Loop-Fehler für Bot %s", self.config_id)
                 self.last_error = f"main_loop: {exc}"
                 self.last_error_at = time.time()
+                if isinstance(exc, (OperationalError, InterfaceError)):
+                    # Wenn Postgres/DNS selbst ausgefallen ist, würde ein
+                    # ErrorLog-Schreibversuch nur einen zweiten langen
+                    # Reconnect-Zyklus auslösen. Bis zur Erholung nach STDOUT.
+                    await self._sleep(30)
+                    continue
                 await self._persist_error("main_loop", "trading_bot.main_loop", exc)
                 await self._sleep(2)
 
     async def fetch_tickers(self, symbols):
         fetch_many_async = getattr(self.exchange, "fetch_tickers_async", None)
         if fetch_many_async:
-            return await asyncio.wait_for(fetch_many_async(symbols), timeout=30)
+            return await asyncio.wait_for(fetch_many_async(symbols), timeout=90)
 
         fetch_many = getattr(self.exchange, "fetch_tickers", None)
         if fetch_many:

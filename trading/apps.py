@@ -17,6 +17,7 @@ _SKIP_AUTOSTART_COMMANDS = {
     "shell",
     "showmigrations",
     "test",
+    "wait_for_database",
 }
 
 

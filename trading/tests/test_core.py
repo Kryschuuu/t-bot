@@ -1,7 +1,7 @@
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from asgiref.sync import async_to_sync
@@ -14,7 +14,9 @@ from trading.forms import BacktestForm, ConfigurationForm
 from trading.market_data import (
     BinancePublicMarketData,
     BitMartPublicMarketData,
+    MarketDataConnectionError,
     SymbolValidationError,
+    _ban_timestamp,
 )
 from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 from trading.tasks import run_backtest
@@ -154,6 +156,30 @@ class MarketDataAdapterTests(TestCase):
         async_to_sync(provider.close)()
         self.assertEqual(result["BTC/USDT"]["last"], "123.45")
         self.assertEqual(result["ETH/USDT"]["last"], "45.67")
+
+    def test_binance_reconnects_after_transient_websocket_close(self):
+        provider = BinancePublicMarketData("spot")
+        calls = 0
+
+        async def fake_fetch(symbols, timeout_seconds):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise MarketDataConnectionError("Verbindung geschlossen")
+            return {"BTC/USDT": {"last": "123"}}
+
+        provider._fetch_once = fake_fetch
+        provider._disconnect = AsyncMock()
+        with patch("trading.market_data.asyncio.sleep", new=AsyncMock()):
+            result = async_to_sync(provider.fetch_tickers_async)(["BTC/USDT"])
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["BTC/USDT"]["last"], "123")
+
+    def test_binance_ban_timestamp_is_parsed_from_error(self):
+        self.assertEqual(
+            _ban_timestamp("IP banned until 1787181287549. Please use WebSocket Streams"),
+            1787181287.549,
+        )
 
     def test_bitmart_adapter_validates_then_reads_v3_ticker(self):
         provider = BitMartPublicMarketData("spot")

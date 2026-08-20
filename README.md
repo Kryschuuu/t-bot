@@ -34,7 +34,7 @@ pip-audit -r requirements.txt   # wenn pip-audit installiert ist
 
 ## Render-Deployment
 
-`render.yaml` definiert einen Docker-Web-Service und PostgreSQL in Frankfurt. Der Container installiert die für PDF-Reports benötigten Systembibliotheken, führt beim Start Migrationen aus und startet Daphne auf `$PORT`.
+`render.yaml` definiert einen Docker-Web-Service und PostgreSQL in Frankfurt. Der Container installiert die für PDF-Reports benötigten Systembibliotheken, wartet beim Start mit DNS-/Connection-Backoff auf PostgreSQL, führt Migrationen aus und startet Daphne auf `$PORT`.
 
 1. Branch `arena/01a01bc6-t-bot` zu GitHub pushen.
 2. In Render **New → Blueprint** wählen und dieses Repository verbinden.

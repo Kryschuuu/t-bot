@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -16,6 +17,17 @@ class MarketDataError(RuntimeError):
 
 class MarketDataConnectionError(MarketDataError):
     """Die Börse war technisch nicht erreichbar oder lieferte ungültige Daten."""
+
+
+class WebSocketReconnectError(MarketDataConnectionError):
+    def __init__(self, exchange, attempts, last_error):
+        self.exchange = exchange
+        self.attempts = attempts
+        self.last_error = str(last_error)
+        super().__init__(
+            f"{exchange}-WebSocket konnte nach {attempts} Versuchen nicht "
+            f"wiederhergestellt werden: {last_error}"
+        )
 
 
 class SymbolValidationError(MarketDataError):
@@ -108,12 +120,18 @@ class BinancePublicMarketData:
         self._stream_key = None
         self._latest = {}
         self._symbol_by_compact = {}
+        self._connected_at = 0
+        self._endpoint_index = 0
 
     @property
-    def websocket_base_url(self):
+    def websocket_base_urls(self):
         if self.market == "futures":
-            return "wss://fstream.binance.com/stream"
-        return "wss://stream.binance.com:443/stream"
+            return ("wss://fstream.binance.com/stream",)
+        return (
+            "wss://stream.binance.com:443/stream",
+            "wss://stream.binance.com:9443/stream",
+            "wss://data-stream.binance.vision/stream",
+        )
 
     async def _disconnect(self):
         if self._websocket is not None:
@@ -122,13 +140,18 @@ class BinancePublicMarketData:
         if self._session is not None:
             await self._session.close()
             self._session = None
+        self._connected_at = 0
 
     async def _connect(self, symbols):
         compact_symbols = tuple(sorted(_compact_symbol(symbol) for symbol in symbols))
+        connection_is_fresh = (
+            self._connected_at and time.monotonic() - self._connected_at < 23 * 3600
+        )
         if (
             self._websocket is not None
             and not self._websocket.closed
             and compact_symbols == self._stream_key
+            and connection_is_fresh
         ):
             return
         await self._disconnect()
@@ -137,18 +160,20 @@ class BinancePublicMarketData:
         streams = "/".join(f"{symbol.lower()}@miniTicker" for symbol in compact_symbols)
         timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
+        endpoint = self.websocket_base_urls[self._endpoint_index % len(self.websocket_base_urls)]
         try:
             self._websocket = await self._session.ws_connect(
-                self.websocket_base_url,
+                endpoint,
                 params={"streams": streams},
                 heartbeat=20,
                 autoping=True,
                 max_msg_size=1_000_000,
             )
+            self._connected_at = time.monotonic()
         except Exception as exc:
             await self._disconnect()
             raise MarketDataConnectionError(
-                f"Binance-WebSocket-Verbindung fehlgeschlagen: {exc}"
+                f"Binance-WebSocket-Verbindung zu {endpoint} fehlgeschlagen: {exc}"
             ) from exc
 
     def _consume_message(self, message):
@@ -175,7 +200,7 @@ class BinancePublicMarketData:
             return True
         return False
 
-    async def fetch_tickers_async(self, symbols, timeout_seconds=12):
+    async def _fetch_once(self, symbols, timeout_seconds):
         await self._connect(symbols)
         required = set(symbols)
         received_update = False
@@ -209,9 +234,26 @@ class BinancePublicMarketData:
             self._consume_message(message)
         return {symbol: self._latest[symbol].copy() for symbol in symbols}
 
+    async def fetch_tickers_async(self, symbols, timeout_seconds=12, max_reconnects=5):
+        last_error = None
+        for attempt in range(1, max_reconnects + 1):
+            try:
+                return await self._fetch_once(symbols, timeout_seconds)
+            except SymbolValidationError:
+                raise
+            except MarketDataConnectionError as exc:
+                last_error = exc
+                await self._disconnect()
+                self._endpoint_index = (self._endpoint_index + 1) % len(self.websocket_base_urls)
+                if attempt >= max_reconnects:
+                    break
+                delay = min(30, 2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                await asyncio.sleep(delay)
+        raise WebSocketReconnectError("Binance", max_reconnects, last_error)
+
     async def validate_symbols_async(self, symbols):
         try:
-            await self.fetch_tickers_async(symbols, timeout_seconds=10)
+            await self.fetch_tickers_async(symbols, timeout_seconds=10, max_reconnects=2)
         finally:
             await self.close()
         return []

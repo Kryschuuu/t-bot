@@ -28,6 +28,14 @@ def env_int(name, default, minimum=1):
         return default
 
 
+def env_float(name, default, minimum=0.1):
+    try:
+        return max(minimum, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        logger.warning("Ungültiger Zahlenwert für %s; verwende %s", name, default)
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Sicherheit / Grundkonfiguration
 # ---------------------------------------------------------------------------
@@ -192,30 +200,27 @@ WSGI_APPLICATION = "trading_bot_project.wsgi.application"
 # bereit. Lokal faellt die App auf SQLite zurueck, falls nichts gesetzt ist.
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
-    DATABASES = {
-        "default": dj_database_url.parse(
-            DATABASE_URL,
-            # BUGFIX ("connection already closed" / psycopg2.InterfaceError,
-            # siehe trading/trading_bot.py db_safe()): Render Postgres Free
-            # Tier kappt idle gewordene Connections serverseitig deutlich
-            # frueher als die alten 600s. Django hat das bis dato nicht
-            # bemerkt (kein CONN_HEALTH_CHECKS) und eine bereits tote
-            # Connection einfach weiterverwendet -> InterfaceError bei der
-            # naechsten Query. conn_max_age auf 60s gesenkt (kuerzeres
-            # "Verfallsdatum" pro Connection) UND conn_health_checks=True
-            # aktiviert: Django pingt eine wiederverwendete Connection kurz
-            # (SELECT 1), bevor sie fuer eine Query genutzt wird, und
-            # verwirft+erneuert sie automatisch, falls der Ping fehlschlaegt.
-            # Das greift ueberall dort, wo Django selbst den Request-Zyklus
-            # steuert (Views, Admin, Channels-Consumer). Fuer den dauerhaft
-            # laufenden TradingBot-Thread (kein Request-Zyklus, daher feuert
-            # der Health-Check-Trigger dort nie) sorgt zusaetzlich der
-            # eigene db_safe()-Reconnect-Decorator in trading_bot.py.
-            conn_max_age=60,
-            conn_health_checks=True,
-            ssl_require=env_bool("DATABASE_SSL_REQUIRE", True),
-        )
-    }
+    database_config = dj_database_url.parse(
+        DATABASE_URL,
+        # Kurze Lebensdauer + Health-Check verhindern die Wiederverwendung
+        # serverseitig geschlossener Render-Postgres-Verbindungen.
+        conn_max_age=60,
+        conn_health_checks=True,
+        ssl_require=env_bool("DATABASE_SSL_REQUIRE", True),
+    )
+    # libpq erkennt tote TCP-Verbindungen zeitnah. `connect_timeout` begrenzt
+    # insbesondere DNS-/Connect-Hänger während eines Datastore-Neustarts.
+    database_config.setdefault("OPTIONS", {}).update(
+        {
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+            "tcp_user_timeout": 30_000,
+        }
+    )
+    DATABASES = {"default": database_config}
 else:
     DATABASES = {
         "default": {
@@ -311,6 +316,9 @@ LOGGING = {
 # Steuert, ob TradingBots fuer aktive Konfigurationen beim Prozessstart
 # automatisch gestartet werden sollen (siehe trading/apps.py).
 AUTOSTART_BOTS = env_bool("AUTOSTART_BOTS", True)
+DB_RECONNECT_MAX_RETRIES = env_int("DB_RECONNECT_MAX_RETRIES", 10, minimum=1)
+DB_RECONNECT_BASE_DELAY = env_float("DB_RECONNECT_BASE_DELAY", 1.0)
+DB_RECONNECT_MAX_DELAY = env_float("DB_RECONNECT_MAX_DELAY", 30.0)
 MAX_DATA_LOGS_PER_SYMBOL = env_int("MAX_DATA_LOGS_PER_SYMBOL", 20_000, minimum=1_000)
 DATA_LOG_CLEANUP_EVERY = env_int("DATA_LOG_CLEANUP_EVERY", 500, minimum=10)
 
