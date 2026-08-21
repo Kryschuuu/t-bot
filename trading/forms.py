@@ -252,21 +252,66 @@ class DashboardConfigurationForm(forms.ModelForm):
 
 
 class BacktestForm(forms.Form):
-    acc_from = forms.FloatField(label="Von")
-    acc_to = forms.FloatField(label="Bis")
-    acc_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
-    nda_from = forms.FloatField(label="Von")
-    nda_to = forms.FloatField(label="Bis")
-    nda_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
-    deltadelta_from = forms.FloatField(label="Von")
-    deltadelta_to = forms.FloatField(label="Bis")
-    deltadelta_steps = forms.FloatField(label="Schrittgröße", min_value=1e-12)
+    acc_from = forms.FloatField(
+        label="Beschleunigung – von",
+        help_text="Untere Schwelle für DVA / vorherige NDA.",
+    )
+    acc_to = forms.FloatField(label="Beschleunigung – bis")
+    acc_steps = forms.FloatField(label="Beschleunigung – Schritt", min_value=1e-12)
+    nda_from = forms.FloatField(
+        label="NDA – von",
+        help_text="Untere Schwelle der normalisierten prozentualen Preisänderung.",
+    )
+    nda_to = forms.FloatField(label="NDA – bis")
+    nda_steps = forms.FloatField(label="NDA – Schritt", min_value=1e-12)
+    deltadelta_from = forms.FloatField(
+        label="DeltaDelta – von",
+        help_text="Untere Schwelle des geglätteten Zwei-Punkt-NDA-Momentums.",
+    )
+    deltadelta_to = forms.FloatField(label="DeltaDelta – bis")
+    deltadelta_steps = forms.FloatField(label="DeltaDelta – Schritt", min_value=1e-12)
+    trade_amount = forms.FloatField(
+        label="Trade-Betrag",
+        min_value=0.00000001,
+        help_text="Virtueller Nominalbetrag je Position.",
+    )
+    take_profit = forms.FloatField(
+        label="Take Profit (%)",
+        min_value=0.001,
+        max_value=100,
+    )
+    stop_loss = forms.FloatField(
+        label="Stop Loss (%)",
+        min_value=0.001,
+        max_value=100,
+    )
+    fee = forms.FloatField(
+        label="Gebühr je Order (%)",
+        min_value=0,
+        max_value=5,
+    )
+    max_price_points = forms.IntegerField(
+        label="Maximale historische Preispunkte",
+        min_value=100,
+        max_value=5_000,
+        initial=5_000,
+        help_text="Weniger Punkte reduzieren CPU- und RAM-Verbrauch.",
+    )
     schedule_backtest = forms.BooleanField(label="Backtest planen?", required=False)
     scheduled_start_time = forms.DateTimeField(
         label="Geplante Startzeit",
         required=False,
         widget=forms.DateTimeInput(attrs={"type": "datetime-local"}),
     )
+
+    def __init__(self, *args, start_capital=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.start_capital = start_capital
+        for field in self.fields.values():
+            if isinstance(field.widget, forms.CheckboxInput):
+                field.widget.attrs["class"] = "form-check-input"
+            else:
+                field.widget.attrs["class"] = "form-control"
 
     def clean(self):
         cleaned_data = super().clean()
@@ -276,6 +321,18 @@ class BacktestForm(forms.Form):
             self.add_error("scheduled_start_time", "Bitte eine Startzeit angeben.")
         elif start_time and start_time <= timezone.now():
             self.add_error("scheduled_start_time", "Die Startzeit muss in der Zukunft liegen.")
+
+        trade_amount = cleaned_data.get("trade_amount")
+        fee = cleaned_data.get("fee") or 0
+        if (
+            self.start_capital is not None
+            and trade_amount is not None
+            and trade_amount * (1 + fee / 100) > float(self.start_capital)
+        ):
+            self.add_error(
+                "trade_amount",
+                "Trade-Betrag inklusive Kaufgebühr übersteigt das Startkapital.",
+            )
 
         dimensions = []
         for prefix in ("acc", "nda", "deltadelta"):

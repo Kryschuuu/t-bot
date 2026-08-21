@@ -1,6 +1,6 @@
 # t-bot – Benutzer- und Indikatorhandbuch
 
-**Version 2.0.4 · Stand 21. August 2026**
+**Version 2.1.0 · Stand 21. August 2026**
 
 [TOC]
 
@@ -99,6 +99,10 @@ Spot-Marktdaten laufen über die aktuelle öffentliche BitMart-V3-API. Symbole w
 - Spot: öffentliche Spot-Pair- und Last-Price-Endpunkte; mindestens 5 Sekunden Intervall begrenzen Einzelabfragen defensiv.
 - Keine privaten API-Schlüssel für Paper Trading.
 - Ist ein öffentlicher Endpoint nicht verfügbar oder liefert keinen verifizierbaren Katalog, wird die Konfiguration sicher abgelehnt. Dadurch entsteht kein aggressiver Fehler-/Retry-Loop und kein API-Ban.
+
+### Lokale Marktanalyse ohne Binance-REST
+
+Die Seite **Analyse** verwendet ausschließlich die bereits vom Bot gestreamten und in `DataLog` gespeicherten Preise. Sie erzeugt daraus Zeit-Buckets (1m bis 1d) und berechnet SMA 5/15. Dadurch entstehen exakt null externe Analyse-Requests, kein Binance-Request-Weight und kein 418-IP-Ban. Analyse und laufender Binance-WebSocket des Bots sind technisch getrennt. Mindestens 16 lokale Intervalle werden benötigt; bei zu wenig Historie zeigt die Seite eine konkrete Sammelzeit-Meldung.
 
 ## 6. Indikatoren – exakte Berechnung
 
@@ -252,6 +256,12 @@ Empfohlener Ablauf:
 4. Ergebnisse auf einem anderen Zeitraum gegenprüfen.
 
 Backtests sind keine Prognose. Overfitting entsteht, wenn Parameter zu eng an eine einzige Historie angepasst werden.
+
+### Produktionsbetrieb und Isolation
+
+Auf Render Free ist die Backtest-Ausführung absichtlich deaktiviert: 0,1 CPU und 512 MB werden vom Web-/Bot-Prozess benötigt, und Free unterstützt keinen isolierten Background Worker. Ein lokaler Thread könnte die absolute Bot-Priorität nicht garantieren. Lokal kann der serielle Entwicklungsfallback aktiviert werden.
+
+Produktiv benötigt Backtesting `REDIS_URL` und einen separaten Celery-Worker auf Queue `backtest` mit Concurrency 1, Prefetch 1, maximal einem Task pro Child und 384-MB-Child-Limit. Details, Architekturdiagramm, Messergebnisse und Deployment stehen in `BACKTESTING_STUDY.md`; `render.worker.example.yaml` ist die absichtlich nicht automatisch aktivierte Vorlage.
 
 ## 12. Fehler-Log und Betrieb
 

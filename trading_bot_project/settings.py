@@ -97,6 +97,18 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TASK_SOFT_TIME_LIMIT = 60 * 60
 CELERY_TASK_TIME_LIMIT = 60 * 60 + 300
+CELERY_WORKER_CONCURRENCY = 1
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 1
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = env_int("CELERY_WORKER_MAX_MEMORY_PER_CHILD", 384_000)
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_TASK_ROUTES = {
+    "trading.tasks.run_backtest": {"queue": "backtest", "priority": 0},
+    "trading.tasks.simulate_candidate": {"queue": "backtest", "priority": 0},
+    "trading.tasks.collect_results": {"queue": "backtest", "priority": 0},
+    "trading.tasks.schedule_backtests": {"queue": "backtest", "priority": 0},
+}
 
 if REDIS_URL:
     CELERY_BROKER_URL = REDIS_URL
@@ -107,6 +119,15 @@ else:
     CELERY_RESULT_BACKEND = "cache+memory://"
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
+
+# Ein lokaler Backtest-Thread teilt CPU/RAM mit dem Bot und ist auf Render Free
+# nicht sicher isolierbar. Lokal ist er für Entwicklung erlaubt; Produktion
+# benötigt REDIS_URL plus separaten Celery-Worker.
+BACKTEST_LOCAL_FALLBACK_ENABLED = env_bool(
+    "BACKTEST_LOCAL_FALLBACK_ENABLED",
+    default=not env_bool("RENDER", False),
+)
+BACKTEST_EXECUTION_AVAILABLE = bool(REDIS_URL) or BACKTEST_LOCAL_FALLBACK_ENABLED
 
 # ---------------------------------------------------------------------------
 # Security Header (nur wenn nicht DEBUG)
@@ -176,6 +197,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "trading.context_processors.app_metadata",
             ],
         },
     },

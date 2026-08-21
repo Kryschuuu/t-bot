@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import csv
 import logging
@@ -11,7 +10,6 @@ from functools import lru_cache
 from io import BytesIO
 
 import markdown
-from asgiref.sync import async_to_sync
 from celery.result import AsyncResult
 from django.conf import settings
 from django.contrib import messages
@@ -37,7 +35,7 @@ from .forms import (
     RegistrationForm,
 )
 from .market_data import MarketDataError, SymbolValidationError, validate_exchange_symbols
-from .models import BacktestTask, Configuration, ErrorLog
+from .models import BacktestTask, Configuration, DataLog, ErrorLog
 from .symbols import get_available_symbols
 from .tasks import dispatch_task, local_task_is_active, run_backtest
 from .trading_bot import bot_manager
@@ -169,7 +167,10 @@ def _render_manual():
     source = (settings.BASE_DIR / "MANUAL.md").read_text(encoding="utf-8")
     return markdown.markdown(
         source,
-        extensions=["extra", "fenced_code", "tables", "toc", "sane_lists"],
+        extensions=["extra", "fenced_code", "tables", "toc", "sane_lists", "codehilite"],
+        extension_configs={
+            "codehilite": {"css_class": "codehilite", "guess_lang": False, "noclasses": False}
+        },
         output_format="html5",
     )
 
@@ -1039,44 +1040,89 @@ def _combination_count(params, symbol_count):
 
 
 @login_required
+@require_GET
+def backtesting_index(request):
+    configs = Configuration.objects.filter(user=request.user).order_by("-id")
+    cards = []
+    for config in configs:
+        tasks = BacktestTask.objects.filter(configuration=config)
+        cards.append(
+            {
+                "config": config,
+                "running": tasks.filter(status__in=["pending", "running", "paused"]).count(),
+                "completed": tasks.filter(status="completed").count(),
+                "last_task": tasks.order_by("-created_at").first(),
+            }
+        )
+    return render(request, "trading/backtesting_index.html", {"cards": cards})
+
+
+@login_required
 def backtesting_form(request, config_id):
     config = get_object_or_404(Configuration, id=config_id, user=request.user)
-    form = BacktestForm(request.POST or None)
+    initial = {
+        "acc_from": float(config.div_DVA_prev_NDA_threshold_buy) - 1,
+        "acc_to": float(config.div_DVA_prev_NDA_threshold_buy) + 1,
+        "acc_steps": 0.1,
+        "nda_from": float(config.nda_threshold_buy) - 0.5,
+        "nda_to": float(config.nda_threshold_buy) + 0.5,
+        "nda_steps": 0.05,
+        "deltadelta_from": float(config.deltadelta_threshold_buy) - 0.5,
+        "deltadelta_to": float(config.deltadelta_threshold_buy) + 0.5,
+        "deltadelta_steps": 0.05,
+        "trade_amount": float(config.trade_amount),
+        "take_profit": float(config.take_profit),
+        "stop_loss": float(config.stop_loss),
+        "fee": float(config.fee),
+        "max_price_points": 5_000,
+    }
+    form = BacktestForm(
+        request.POST or None,
+        initial=initial,
+        start_capital=config.start_capital,
+    )
     if request.method == "POST" and form.is_valid():
-        params = form.cleaned_data.copy()
-        schedule_backtest = params.pop("schedule_backtest", False)
-        scheduled_start_time = params.pop("scheduled_start_time", None)
-        symbols = _symbols(config)
-        combinations = _combination_count(params, len(symbols))
-        if combinations > _MAX_TOTAL_BACKTEST_COMBINATIONS:
+        if not settings.BACKTEST_EXECUTION_AVAILABLE:
             form.add_error(
                 None,
-                f"Mit allen Symbolen entstehen {combinations:,} Kombinationen; "
-                f"maximal {_MAX_TOTAL_BACKTEST_COMBINATIONS:,} sind erlaubt.",
+                "Backtesting ist auf Render Free zum Schutz des Trading-Bots deaktiviert. "
+                "REDIS_URL und einen separaten Celery-Worker konfigurieren.",
             )
         else:
-            status = "scheduled" if schedule_backtest else "pending"
-            backtest_task = BacktestTask.objects.create(
-                configuration=config,
-                symbol=",".join(symbols),
-                parameters=params,
-                result={},
-                status=status,
-                is_scheduled=schedule_backtest,
-                scheduled_start_time=scheduled_start_time,
-            )
-            if not schedule_backtest:
-                celery_task = dispatch_task(
-                    run_backtest,
-                    config.id,
-                    params,
-                    symbols,
-                    backtest_task.id,
+            params = form.cleaned_data.copy()
+            schedule_backtest = params.pop("schedule_backtest", False)
+            scheduled_start_time = params.pop("scheduled_start_time", None)
+            symbols = _symbols(config)
+            combinations = _combination_count(params, len(symbols))
+            if combinations > _MAX_TOTAL_BACKTEST_COMBINATIONS:
+                form.add_error(
+                    None,
+                    f"Mit allen Symbolen entstehen {combinations:,} Kombinationen; "
+                    f"maximal {_MAX_TOTAL_BACKTEST_COMBINATIONS:,} sind erlaubt.",
                 )
-                BacktestTask.objects.filter(id=backtest_task.id).update(
-                    celery_task_id=celery_task.id
+            else:
+                status = "scheduled" if schedule_backtest else "pending"
+                backtest_task = BacktestTask.objects.create(
+                    configuration=config,
+                    symbol=",".join(symbols),
+                    parameters=params,
+                    result={},
+                    status=status,
+                    is_scheduled=schedule_backtest,
+                    scheduled_start_time=scheduled_start_time,
                 )
-            return redirect("backtesting_form", config_id=config.id)
+                if not schedule_backtest:
+                    celery_task = dispatch_task(
+                        run_backtest,
+                        config.id,
+                        params,
+                        symbols,
+                        backtest_task.id,
+                    )
+                    BacktestTask.objects.filter(id=backtest_task.id).update(
+                        celery_task_id=celery_task.id
+                    )
+                return redirect("backtesting_form", config_id=config.id)
 
     if settings.CELERY_TASK_ALWAYS_EAGER:
         interrupted = BacktestTask.objects.filter(
@@ -1113,6 +1159,11 @@ def backtesting_form(request, config_id):
             "tasks_running": tasks_running,
             "tasks_scheduled": tasks_scheduled,
             "backtests": tasks_completed,
+            "execution_available": settings.BACKTEST_EXECUTION_AVAILABLE,
+            "symbol_count": len(_symbols(config)),
+            "execution_mode": (
+                "Celery-Worker" if settings.REDIS_URL else "Lokaler Entwicklungsmodus"
+            ),
         },
     )
 
@@ -1163,7 +1214,14 @@ def generate_backtest_pdf(request, task_id):
 def analyse_view(request):
     symbols = [symbol.strip().upper() for symbol in request.GET.getlist("symbols") if symbol]
     timeframe = request.GET.get("timeframe", "1h")
-    allowed_timeframes = {"1m", "5m", "15m", "1h", "4h", "1d"}
+    timeframe_seconds = {
+        "1m": 60,
+        "5m": 5 * 60,
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "4h": 4 * 60 * 60,
+        "1d": 24 * 60 * 60,
+    }
     available_symbols = sorted(
         {
             symbol
@@ -1171,73 +1229,80 @@ def analyse_view(request):
             for symbol in _symbols(config)
         }
     )
+    context = {
+        "available_symbols": available_symbols,
+        "selected_symbols": symbols,
+        "selected_timeframe": timeframe,
+        "analysis_source": "Lokale, vom Bot gestreamte DataLogs (keine Binance-REST-Requests)",
+    }
     if not symbols:
-        return render(
-            request,
-            "trading/analyse.html",
-            {"available_symbols": available_symbols, "selected_timeframe": timeframe},
+        return render(request, "trading/analyse.html", context)
+    if timeframe not in timeframe_seconds or len(symbols) > 10:
+        context["error"] = "Ungültiger Zeitrahmen oder zu viele Symbole."
+        return render(request, "trading/analyse.html", context)
+
+    analysis_results = []
+    bucket_size = timeframe_seconds[timeframe]
+    for symbol in symbols:
+        source_config_id = (
+            DataLog.objects.filter(configuration__user=request.user, symbol=symbol)
+            .order_by("-timestamp", "-id")
+            .values_list("configuration_id", flat=True)
+            .first()
         )
-    if timeframe not in allowed_timeframes or len(symbols) > 10:
-        return render(
-            request,
-            "trading/analyse.html",
+        if not source_config_id:
+            analysis_results.append(
+                {
+                    "symbol": symbol,
+                    "error": "Noch keine lokalen Bot-Marktdaten vorhanden.",
+                }
+            )
+            continue
+        source_config = Configuration.objects.get(id=source_config_id)
+        rows = list(
+            DataLog.objects.filter(configuration_id=source_config_id, symbol=symbol).order_by(
+                "-timestamp", "-id"
+            )[:20_000]
+        )
+        rows.reverse()
+        closes_by_bucket = {}
+        for row in rows:
+            bucket = int(row.timestamp.timestamp()) // bucket_size
+            closes_by_bucket[bucket] = float(row.price)
+        closes = list(closes_by_bucket.values())
+        if len(closes) < 16:
+            analysis_results.append(
+                {
+                    "symbol": symbol,
+                    "error": (
+                        f"Nur {len(closes)} abgeschlossene {timeframe}-Intervalle vorhanden; "
+                        "mindestens 16 erforderlich. Bot länger sammeln lassen oder kleineren "
+                        "Zeitrahmen wählen."
+                    ),
+                    "source": f"{source_config.name} / {source_config.get_exchange_display()}",
+                }
+            )
+            continue
+        short_now = sum(closes[-5:]) / 5
+        long_now = sum(closes[-15:]) / 15
+        short_previous = sum(closes[-6:-1]) / 5
+        long_previous = sum(closes[-16:-1]) / 15
+        signal = "Neutral"
+        if short_previous <= long_previous and short_now > long_now:
+            signal = "Kaufen"
+        elif short_previous >= long_previous and short_now < long_now:
+            signal = "Verkaufen"
+        analysis_results.append(
             {
-                "error": "Ungültiger Zeitrahmen oder zu viele Symbole.",
-                "available_symbols": available_symbols,
-            },
+                "symbol": symbol,
+                "signal": signal,
+                "source": f"{source_config.name} / {source_config.get_exchange_display()}",
+                "candles": len(closes),
+                "last_price": closes[-1],
+                "sma_short": round(short_now, 8),
+                "sma_long": round(long_now, 8),
+            }
         )
 
-    async def analyze_all():
-        import ccxt
-        import ccxt.async_support as ccxt_async
-
-        exchange = ccxt_async.binance({"enableRateLimit": True, "timeout": 15_000})
-
-        async def analyze_symbol(symbol):
-            try:
-                limit = 30
-                seconds = exchange.parse_timeframe(timeframe)
-                since = exchange.milliseconds() - limit * seconds * 1000
-                candles = await exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe,
-                    since=since,
-                    limit=limit,
-                )
-                if len(candles) < 16:
-                    return {"symbol": symbol, "error": "Nicht genügend Marktdaten."}
-                closes = [candle[4] for candle in candles]
-                short_now = sum(closes[-5:]) / 5
-                long_now = sum(closes[-15:]) / 15
-                short_previous = sum(closes[-6:-1]) / 5
-                long_previous = sum(closes[-16:-1]) / 15
-                signal = "Neutral"
-                if short_previous <= long_previous and short_now > long_now:
-                    signal = "Kaufen"
-                elif short_previous >= long_previous and short_now < long_now:
-                    signal = "Verkaufen"
-                return {"symbol": symbol, "signal": signal}
-            except ccxt.NetworkError as exc:
-                return {"symbol": symbol, "error": f"Netzwerkfehler: {exc}"}
-            except ccxt.ExchangeError as exc:
-                return {"symbol": symbol, "error": f"Börsenfehler: {exc}"}
-            except Exception as exc:
-                logger.exception("Analyse für %s fehlgeschlagen", symbol)
-                return {"symbol": symbol, "error": str(exc)}
-
-        try:
-            return await asyncio.gather(*(analyze_symbol(symbol) for symbol in symbols))
-        finally:
-            await exchange.close()
-
-    results = async_to_sync(analyze_all)()
-    return render(
-        request,
-        "trading/analyse.html",
-        {
-            "analysis_results": results,
-            "selected_symbols": symbols,
-            "selected_timeframe": timeframe,
-            "available_symbols": available_symbols,
-        },
-    )
+    context["analysis_results"] = analysis_results
+    return render(request, "trading/analyse.html", context)

@@ -1,0 +1,54 @@
+# OPTIONAL PAID BACKTEST WORKER – intentionally not merged into render.yaml.
+# Render Free does not support isolated background workers. Copy/adapt these
+# resources only after provisioning paid/external Redis and a paid worker.
+services:
+  - type: worker
+    name: t-bot-backtest-worker
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: arena/01a01bc6-t-bot
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      celery -A trading_bot_project worker -Q backtest --loglevel=INFO
+      --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=1
+      --max-memory-per-child=384000
+    envVars:
+      - key: RENDER
+        value: "True"
+      - key: AUTOSTART_BOTS
+        value: "False"
+      - key: REDIS_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: t-bot-db
+          property: connectionString
+      - key: SECRET_KEY
+        sync: false
+      - key: PASSPHRASE
+        sync: false
+
+  - type: worker
+    name: t-bot-backtest-scheduler
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: arena/01a01bc6-t-bot
+    dockerfilePath: ./Dockerfile
+    dockerCommand: celery -A trading_bot_project beat --loglevel=INFO
+    envVars:
+      - key: RENDER
+        value: "True"
+      - key: AUTOSTART_BOTS
+        value: "False"
+      - key: REDIS_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: t-bot-db
+          property: connectionString
+      - key: SECRET_KEY
+        sync: false
+      - key: PASSPHRASE
+        sync: false

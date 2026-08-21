@@ -35,6 +35,11 @@ def local_task_is_active(task_id):
 def dispatch_task(task, *args, **kwargs):
     """Dispatcht über Celery oder über einen lokalen Daemon-Thread ohne Broker."""
     if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+        if not settings.BACKTEST_LOCAL_FALLBACK_ENABLED:
+            raise RuntimeError(
+                "Lokale Backtests sind in Produktion deaktiviert. "
+                "REDIS_URL und separaten Celery-Worker konfigurieren."
+            )
         synthetic_id = f"eager-{uuid.uuid4()}"
         with _LOCAL_TASK_IDS_LOCK:
             _LOCAL_TASK_IDS.add(synthetic_id)
@@ -91,11 +96,12 @@ def _parameter_values(start, end, step):
     return values
 
 
-def _historical_prices(config_id, symbol):
+def _historical_prices(config_id, symbol, limit=_MAX_BACKTEST_PRICE_POINTS):
+    limit = max(100, min(_MAX_BACKTEST_PRICE_POINTS, int(limit)))
     prices = list(
         DataLog.objects.filter(configuration_id=config_id, symbol=symbol)
         .order_by("-timestamp")
-        .values_list("price", flat=True)[:_MAX_BACKTEST_PRICE_POINTS]
+        .values_list("price", flat=True)[:limit]
     )
     prices.reverse()
     return prices
@@ -118,10 +124,10 @@ def _simulate_candidate(
         deltadelta_threshold,
         {
             "start_capital": config.start_capital,
-            "trade_amount": config.trade_amount,
-            "take_profit": config.take_profit,
-            "stop_loss": config.stop_loss,
-            "fee_percentage": config.fee,
+            "trade_amount": params.get("trade_amount", config.trade_amount),
+            "take_profit": params.get("take_profit", config.take_profit),
+            "stop_loss": params.get("stop_loss", config.stop_loss),
+            "fee_percentage": params.get("fee", config.fee),
         },
         indicator_rows=indicator_rows,
     )
@@ -153,7 +159,11 @@ def simulate_candidate(
     del self, task_id
     try:
         config = Configuration.objects.get(id=config_id)
-        prices = _historical_prices(config.id, symbol)
+        prices = _historical_prices(
+            config.id,
+            symbol,
+            params.get("max_price_points", _MAX_BACKTEST_PRICE_POINTS),
+        )
         if len(prices) < 3:
             return {"symbol": symbol, "error": "Mindestens drei Preispunkte benötigt."}
         return _simulate_candidate(
@@ -265,7 +275,14 @@ def run_backtest(self, config_id, params, symbols, task_id):
                 f"Ungültige Anzahl Kombinationen ({total}); maximal {_MAX_TOTAL_COMBINATIONS}."
             )
 
-        prices_by_symbol = {symbol: _historical_prices(config_id, symbol) for symbol in symbols}
+        prices_by_symbol = {
+            symbol: _historical_prices(
+                config_id,
+                symbol,
+                params.get("max_price_points", _MAX_BACKTEST_PRICE_POINTS),
+            )
+            for symbol in symbols
+        }
         best_results = {}
         errors = []
         completed = 0

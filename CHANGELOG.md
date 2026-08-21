@@ -2,6 +2,20 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.1.0] – 2026-08-21
+
+### Lokale Analyse, modernes UI und isolierte Backtesting-Architektur
+
+- Analyse verwendet lokale DataLogs statt Binance-REST-OHLCV. Damit entstehen keine Analyse-API-Requests, kein Request-Weight und kein HTTP-418-Ban; SMA-5/15 wird aus lokalen Zeit-Buckets berechnet.
+- Navigation vollständig modernisiert; Backtesting ist direkt im Hauptmenü erreichbar, Hilfe sitzt rechts neben Benutzer und Logout.
+- Hilfeseite erhielt kontrastreiche Pygments-Codehervorhebung, bessere Typografie, Spacing, Tabellen und Druckansicht.
+- Backtesting-Auswahlseite für alle Konfigurationen ergänzt.
+- Backtesting-Formular um benannte Indikatorbereiche, Beschreibungen, Trade-Betrag, Take Profit, Stop Loss, Gebühr, Preispunkt-Limit, Live-Kombinationszähler und ausklappbare Hilfe erweitert.
+- Machbarkeitsstudie dokumentiert: Render Free kann harte Prozessisolation nicht garantieren. Lokale Backtests sind dort deaktiviert; Produktion nutzt Redis plus separaten Celery-Worker.
+- Celery Queue `backtest`, Concurrency 1, Prefetch 1, Child-Recycling, 384-MB-Limit, Soft-/Hard-Time-Limits und Graceful Degradation konfiguriert.
+- Ressourcen-Probe in separatem Prozess: 100 Kandidaten × 5.000 Punkte, 17,41 MB Peak-RSS, 0,267 s, stabiler 20,21-ms-Eltern-Heartbeat.
+- `BACKTESTING_STUDY.md`, `render.worker.example.yaml` und `scripts/backtest_resource_probe.py` hinzugefügt.
+
 ## [2.0.4] – 2026-08-21
 
 ### Connection-Pool-Fix und autonomer Botbetrieb

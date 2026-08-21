@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,6 +11,7 @@ from django.db import OperationalError
 from django.http import HttpResponse
 from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
 from trading.backtesting import Backtesting
 from trading.forms import BacktestForm, ConfigurationForm
@@ -24,7 +26,7 @@ from trading.market_data import (
 from trading.middleware import DatabaseAvailabilityMiddleware
 from trading.models import BacktestTask, Configuration, DataLog, ErrorLog, TradingLog
 from trading.symbols import get_available_symbols
-from trading.tasks import run_backtest
+from trading.tasks import dispatch_task, run_backtest
 from trading.trading_bot import TradingBot, _close_db_circuit, db_safe
 
 
@@ -312,6 +314,26 @@ class ViewSecurityTests(TestCase):
         response = self.client.get(reverse("generate_backtest_pdf", args=[task.id]))
         self.assertEqual(response.status_code, 404)
 
+    def test_analysis_uses_local_data_without_binance_rest(self):
+        now = timezone.now()
+        for index in range(20):
+            row = DataLog.objects.create(
+                configuration=self.config,
+                symbol="BTC/USDT",
+                price=100 + index,
+                min_price=100 + index,
+                max_price=100 + index,
+            )
+            DataLog.objects.filter(id=row.id).update(timestamp=now - timedelta(minutes=20 - index))
+        response = self.client.get(
+            reverse("analyse"),
+            {"symbols": "BTC/USDT", "timeframe": "1m"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "0 externe API-Requests")
+        self.assertContains(response, "Berechnung erfolgreich")
+        self.assertNotContains(response, "418")
+
     def test_data_api_rejects_unknown_symbol(self):
         response = self.client.get(
             reverse("data_logs_api"),
@@ -514,16 +536,17 @@ class TradingBotTests(TransactionTestCase):
         self.assertEqual(sell.current_capital, self.config.start_capital + sell.pl_nominal)
 
 
-@override_settings(AUTOSTART_BOTS=False)
+@override_settings(AUTOSTART_BOTS=False, PASSPHRASE_GATE_ENABLED=False)
 class BacktestTaskTests(TestCase):
     def setUp(self):
-        user = User.objects.create_user("backtest-user", password="backtest-password")
+        self.user = User.objects.create_user("backtest-user", password="backtest-password")
         self.config = Configuration.objects.create(
-            user=user,
+            user=self.user,
             name="Backtest",
             symbols="BTC/USDT",
             countdown=0,
         )
+        self.client.force_login(self.user)
         for price in (100, 101, 103, 110):
             DataLog.objects.create(
                 configuration=self.config,
@@ -532,6 +555,49 @@ class BacktestTaskTests(TestCase):
                 min_price=price,
                 max_price=price,
             )
+
+    def test_celery_backtest_resource_guards_are_configured(self):
+        from django.conf import settings
+
+        self.assertEqual(
+            settings.CELERY_TASK_ROUTES["trading.tasks.run_backtest"]["queue"], "backtest"
+        )
+        self.assertEqual(settings.CELERY_WORKER_CONCURRENCY, 1)
+        self.assertEqual(settings.CELERY_WORKER_PREFETCH_MULTIPLIER, 1)
+        self.assertLessEqual(settings.CELERY_WORKER_MAX_MEMORY_PER_CHILD, 384_000)
+
+    @override_settings(
+        CELERY_TASK_ALWAYS_EAGER=True,
+        BACKTEST_LOCAL_FALLBACK_ENABLED=False,
+    )
+    def test_dispatch_refuses_local_production_backtest(self):
+        with self.assertRaisesRegex(RuntimeError, "separaten Celery-Worker"):
+            dispatch_task(run_backtest, self.config.id, {}, ["BTC/USDT"], 1)
+
+    @override_settings(BACKTEST_EXECUTION_AVAILABLE=False)
+    def test_backtesting_page_degrades_without_worker(self):
+        response = self.client.post(
+            reverse("backtesting_form", args=[self.config.id]),
+            {
+                "acc_from": 0,
+                "acc_to": 0,
+                "acc_steps": 1,
+                "nda_from": 0,
+                "nda_to": 0,
+                "nda_steps": 1,
+                "deltadelta_from": 0,
+                "deltadelta_to": 0,
+                "deltadelta_steps": 1,
+                "trade_amount": 10,
+                "take_profit": 1,
+                "stop_loss": 1,
+                "fee": 0.1,
+                "max_price_points": 500,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "separaten Celery-Worker")
+        self.assertEqual(BacktestTask.objects.count(), 0)
 
     def test_run_backtest_completes_and_serializes_decimals(self):
         params = {

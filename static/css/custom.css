@@ -1,68 +1,33 @@
-/* static/css/custom.css */
+/* t-bot application theme */
+:root { --nav-1:#07162d; --nav-2:#123d6a; --accent:#39d98a; }
+body { background-color:#f5f7fb; font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif; margin:0; padding:0; color:#172033; }
+.app-navbar { background:linear-gradient(110deg,var(--nav-1),var(--nav-2)); box-shadow:0 4px 18px rgba(3,18,40,.3); min-height:68px; }
+.app-brand { display:flex; align-items:center; gap:.55rem; font-weight:750; letter-spacing:.02em; }
+.app-brand small { display:block; font-size:.62rem; font-weight:500; color:#a9c4df; line-height:1; margin-left:.15rem; }
+.brand-mark { display:inline-grid; place-items:center; width:2rem; height:2rem; border-radius:.55rem; color:#06213a; background:var(--accent); font-size:1.2rem; }
+.app-nav-links { gap:.2rem; margin-left:1.25rem; }
+.app-navbar .nav-link { color:#d9e8f6; border-radius:.45rem; padding:.55rem .75rem!important; transition:background .15s,color .15s,transform .15s; }
+.app-navbar .nav-link:hover { color:white; background:rgba(255,255,255,.12); transform:translateY(-1px); }
+.app-navbar .nav-link.active { color:white; background:rgba(57,217,138,.18); box-shadow:inset 0 -2px var(--accent); }
+.help-link { font-weight:650; }
+.user-pill { display:inline-flex; align-items:center; gap:.35rem; color:white; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.18); border-radius:2rem; padding:.4rem .75rem; margin:.25rem .35rem; white-space:nowrap; }
+.user-pill::first-letter { color:var(--accent); }
+.field-error input,.field-error select,.field-error textarea { border-color:#dc3545!important; box-shadow:0 0 0 .2rem rgba(220,53,69,.15); }
+.container { margin:20px auto; max-width:1200px; padding:15px; }
+.card { background:white; border-radius:10px; box-shadow:0 2px 9px rgba(15,38,68,.09); padding:20px; margin-bottom:15px; }
+.footer { text-align:center; color:#6c757d; margin:40px 0 10px; font-size:.9rem; }
+h1,h2,h3 { color:#172033; }
+table { border-collapse:collapse; width:100%; }
+th,td { padding:10px; border-bottom:1px solid #dee2e6; }
 
-.field-error input,
-.field-error select,
-.field-error textarea {
-  border-color: #dc3545 !important;
-  box-shadow: 0 0 0 0.2rem rgba(220, 53, 69, 0.15);
-}
-
-body {
-    background-color: #f8f9fa;
-    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    margin: 0;
-    padding: 0;
-}
-
-.navbar {
-    background-color: #1e1f21;
-    color: white;
-    padding: 10px 20px;
-}
-
-.navbar a {
-    color: #f1f1f1;
-    text-decoration: none;
-    margin-right: 12px;
-}
-
-.navbar a:hover {
-    color: #0dcaf0;
-}
-
-.container {
-    margin: 20px auto;
-    max-width: 1200px;
-    padding: 15px;
-}
-
-.card {
-    background-color: white;
-    border-radius: 8px;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-    padding: 20px;
-    margin-bottom: 15px;
-}
-
-.footer {
-    text-align: center;
-    color: #888;
-    margin: 40px 0 10px;
-    font-size: 0.9rem;
-}
-
-/* Hauptüberschriften */
-h1, h2, h3 {
-    color: #222;
-}
-
-/* Tabellen */
-table {
-    border-collapse: collapse;
-    width: 100%;
-}
-
-th, td {
-    padding: 10px;
-    border-bottom: 1px solid #ccc;
-}
+/* Markdown/code highlighting: high contrast on a true dark canvas. */
+.manual-content pre,.manual-content .codehilite { background:#111827!important; color:#f8fafc!important; border:1px solid #334155; border-radius:.6rem; }
+.manual-content pre { padding:1rem 1.1rem; font-size:.93rem; line-height:1.55; overflow:auto; }
+.manual-content pre code,.manual-content .codehilite code { color:#f8fafc!important; background:transparent!important; text-shadow:none; font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+.codehilite .k,.codehilite .kd,.codehilite .kn { color:#ff79c6; }
+.codehilite .s,.codehilite .s1,.codehilite .s2 { color:#f1fa8c; }
+.codehilite .mi,.codehilite .mf { color:#bd93f9; }
+.codehilite .nf,.codehilite .nb { color:#50fa7b; }
+.codehilite .c,.codehilite .c1 { color:#94a3b8; font-style:italic; }
+.codehilite .o { color:#8be9fd; }
+@media (max-width:1199px) { .app-nav-links{margin-left:0;margin-top:.75rem}.app-nav-actions{padding-top:.5rem;border-top:1px solid rgba(255,255,255,.13)} }

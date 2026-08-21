@@ -11,57 +11,40 @@
     {% block extra_head %}{% endblock %}
 </head>
 <body>
-<nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-    <div class="container">
-        <a class="navbar-brand" href="{% url 'home' %}">Trading Bot</a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Navigation öffnen">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav me-auto">
-                <li class="nav-item"><a class="nav-link" href="{% url 'help' %}" title="Vollständiges Benutzer- und Indikatorhandbuch">Hilfe</a></li>
-                {% if user.is_authenticated %}
-                <li class="nav-item"><a class="nav-link" href="{% url 'dashboard' %}">Dashboard</a></li>
-                <li class="nav-item"><a class="nav-link" href="{% url 'config_list' %}">Konfigurationen</a></li>
-                <li class="nav-item"><a class="nav-link" href="{% url 'analyse' %}">Analyse</a></li>
-                <li class="nav-item"><a class="nav-link" href="{% url 'error_log' %}">Fehler-Log</a></li>
-                {% if config %}
-                <li class="nav-item"><a class="nav-link" href="{% url 'backtesting_form' config.id %}">Backtesting</a></li>
-                {% endif %}
-                {% endif %}
-            </ul>
-            <ul class="navbar-nav">
-                {% if user.is_authenticated %}
-                <li class="nav-item d-flex align-items-center me-2">
-                    <span class="navbar-text text-white" title="Aktuell angemeldeter Benutzer">👤 {{ user.username }}</span>
-                </li>
-                <li class="nav-item">
-                    <form method="post" action="{% url 'logout' %}">
-                        {% csrf_token %}
-                        <button class="btn btn-link nav-link" type="submit">Logout</button>
-                    </form>
-                </li>
-                {% else %}
-                <li class="nav-item"><a class="nav-link" href="{% url 'login' %}">Login</a></li>
-                {% endif %}
-            </ul>
-        </div>
+<nav class="navbar navbar-expand-xl navbar-dark app-navbar sticky-top">
+  <div class="container-fluid px-lg-4">
+    <a class="navbar-brand app-brand" href="{% url 'home' %}"><span class="brand-mark">↗</span><span>t-bot</span><small>Paper Trading</small></a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Navigation öffnen"><span class="navbar-toggler-icon"></span></button>
+    <div class="collapse navbar-collapse" id="navbarNav">
+      {% with current=request.resolver_match.url_name %}
+      <ul class="navbar-nav me-auto app-nav-links">
+        {% if user.is_authenticated %}
+        <li class="nav-item"><a class="nav-link {% if current == 'dashboard' %}active{% endif %}" href="{% url 'dashboard' %}">Dashboard</a></li>
+        <li class="nav-item"><a class="nav-link {% if 'config' in current %}active{% endif %}" href="{% url 'config_list' %}">Konfigurationen</a></li>
+        <li class="nav-item"><a class="nav-link {% if current == 'analyse' %}active{% endif %}" href="{% url 'analyse' %}">Analyse</a></li>
+        <li class="nav-item"><a class="nav-link {% if 'backtesting' in current %}active{% endif %}" href="{% url 'backtesting_index' %}">Backtesting</a></li>
+        <li class="nav-item"><a class="nav-link {% if current == 'error_log' %}active{% endif %}" href="{% url 'error_log' %}">Fehler-Log</a></li>
+        {% endif %}
+      </ul>
+      <ul class="navbar-nav ms-auto align-items-xl-center app-nav-actions">
+        <li class="nav-item"><a class="nav-link help-link {% if current == 'help' %}active{% endif %}" href="{% url 'help' %}" title="Vollständiges Benutzer-, Indikator- und Betriebsmanual">? Hilfe</a></li>
+        {% if user.is_authenticated %}
+        <li class="nav-item"><span class="user-pill" title="Aktuell angemeldeter Benutzer">● {{ user.username }}</span></li>
+        <li class="nav-item"><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="btn btn-sm btn-outline-light ms-xl-2" type="submit">Logout</button></form></li>
+        {% else %}<li class="nav-item"><a class="btn btn-sm btn-light ms-xl-2" href="{% url 'login' %}">Login</a></li>{% endif %}
+      </ul>
+      {% endwith %}
     </div>
+  </div>
 </nav>
 
 <main class="container py-4">
     {% for message in messages %}
-    <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
-        {{ message }}
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Schließen"></button>
-    </div>
+    <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">{{ message }}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Schließen"></button></div>
     {% endfor %}
     {% block content %}{% endblock %}
 </main>
-
-<footer class="py-3 bg-light border-top mt-5">
-    <div class="container text-center text-muted">&copy; {% now "Y" %} Trading Bot</div>
-</footer>
+<footer class="py-3 bg-light border-top mt-5"><div class="container text-center text-muted">&copy; {% now "Y" %} t-bot · Version {{ app_version }}</div></footer>
 {% block extra_js %}{% endblock %}
 </body>
 </html>

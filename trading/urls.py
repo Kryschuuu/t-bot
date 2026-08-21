@@ -45,6 +45,7 @@ urlpatterns = [
         views.generate_report_csv,
         name="generate_report_csv",
     ),
+    path("backtesting/", views.backtesting_index, name="backtesting_index"),
     path(
         "backtesting/<int:config_id>/",
         views.backtesting_form,
