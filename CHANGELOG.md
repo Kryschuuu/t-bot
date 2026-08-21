@@ -4,6 +4,12 @@ Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projek
 
 ## [2.3.0] – 2026-08-22
 
+### Hotfix: Redis-Alpine-Entrypoint (POSIX-sh)
+
+- `docker/redis-entrypoint.sh` wurde von Bash-auf POSIX-sh-Syntax umgestellt. Das `redis:7.4-alpine`-Image bringt kein `bash` und kein `set -o pipefail` mit; der bisherige Entrypoint nutzte Arrays (`args=(...)`), `[[ ... ]]`, `(( ... ))` und den `=~`-RegEx-Operator und scheiterte still an `/bin/sh` (BusyBox ash), sodass der Redis-Healthcheck fehlschlug und `docker compose up` mit „dependency failed to start: container t-bot-local-redis-1 is unhealthy“ abbrach.
+- Der Entrypoint nutzt jetzt Positionsparameter statt Arrays, `[ ... ]` statt `[[ ... ]]`, numerischen Vergleich via `[ ... -gt ... ]` und eine Allowlist-Pruefung fuer `maxmemory-policy` (verhindert Injection in die Redis-Kommandozeile).
+- `docker/postgres-entrypoint.sh` war bereits POSIX-kompatibel und wurde erfolgreich unter BusyBox ash getestet.
+
 ### Universelles Build-/Install-Skript und automatische Hardware-Optimierung
 
 - `install.sh` ist das neue Distributions-agnostische Build- und Installationsskript. Es erkennt die Linux-Distribution über `/etc/os-release` (inkl. Fallbacks) und wählt automatisch den passenden Paketmanager: `apt` für Debian/Ubuntu, `pacman` für Arch/Manjaro, `dnf`/`yum` für RHEL/CentOS/Fedora/Rocky/Alma/Amazon Linux, `zypper` für openSUSE/SLES und `apk` für Alpine (mit automatischer EPEL-Aktivierung unter RHEL-Derivaten, wo Redis benötigt wird).
