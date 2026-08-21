@@ -2,6 +2,19 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.0.4] – 2026-08-21
+
+### Connection-Pool-Fix und autonomer Botbetrieb
+
+- Root Cause bestätigt: Free-Postgres war nicht primär wegen DNS offline, sondern durch zu viele parallele Client-Verbindungen (`remaining connection slots are reserved for SUPERUSER`).
+- Sämtliche Bot-ORM-Aufrufe laufen über einen eigenen Executor mit standardmäßig genau einem Worker. Direkte Verbindungen verwenden `CONN_MAX_AGE=0` und werden nicht mehr in vielen Thread-Locals festgehalten.
+- Ein optionales `DATABASE_POOL_URL` wird auf bezahlten Render-Datenbanken bevorzugt; Free-Postgres unterstützt Render-PgBouncer nicht und bleibt deshalb bewusst bei streng begrenzten Direktverbindungen.
+- Lokale Backtests werden serialisiert, um weitere parallele DB-Verbindungen und Free-Tier-Last zu vermeiden.
+- Der ungeprüfte automatisch abgeleitete externe Host-Fallback wurde entfernt; ein Fallback ist nur noch explizit konfigurierbar.
+- Bei DB-Ausfall laufen Marktdaten und Strategie mit der letzten validierten Konfiguration weiter. Nicht speicherbare TradingLogs werden bis zur Recovery geordnet im RAM gepuffert und anschließend atomar nachgeschrieben.
+- Neue Hilfe-Seite `/help/` rendert das vollständige `MANUAL.md` mit Inhaltsverzeichnis, Tabellen, Codeblöcken und Druckansicht.
+- Manual um Connection-Pool-Diagnose, autonomen Hintergrundbetrieb und Grenzen des RAM-Journals erweitert.
+
 ## [2.0.3] – 2026-08-20
 
 ### DB-Circuit-Breaker und Free-Tier-Lastreduktion

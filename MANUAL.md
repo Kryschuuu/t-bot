@@ -1,6 +1,8 @@
 # t-bot – Benutzer- und Indikatorhandbuch
 
-**Version 2.0.3 · Stand 20. August 2026**
+**Version 2.0.4 · Stand 21. August 2026**
+
+[TOC]
 
 > t-bot ist eine experimentelle **Paper-Trading-Plattform**. Orders werden simuliert und nicht an eine Börse gesendet. Ergebnisse sind keine Anlageberatung und keine Garantie für zukünftige Entwicklungen.
 
@@ -260,20 +262,47 @@ Typische Meldungen:
 - `SymbolValidationError`: Paar ist nicht gelistet oder passt nicht zur Marktart.
 - `RateLimitError`: Börse hat 418/429 geliefert; t-bot wartet den angegebenen Zeitpunkt oder Backoff ab.
 - `WebSocketReconnectError`: interne Wiederverbindungen waren erfolglos.
-- `OperationalError could not translate host name` oder `connection refused`: temporäre Render-DNS-/Postgres-Störung. t-bot koordiniert Reconnects mit Backoff und versucht nach dem privaten Host automatisch den externen TLS-Host desselben Frankfurt-Datastores.
+- `OperationalError could not translate host name` oder `connection refused`: PostgreSQL beziehungsweise Render-Netzwerk ist nicht erreichbar.
+- `remaining connection slots are reserved for roles with the SUPERUSER attribute`: Die direkten PostgreSQL-Client-Slots sind ausgeschöpft. Das ist kein DNS-Problem und war die tatsächliche Ursache der wiederkehrenden Ausfälle.
 
-Bei einem DB-Ausfall zeigt das Webinterface HTTP 503 statt einer internen Fehlerseite. Das bereits geöffnete Dashboard stoppt weitere API-Aufrufe lokal, verdoppelt die Wartezeit bis maximal 60 Sekunden und lässt jeweils nur einen Recovery-Test zu. Login und Passphrase liegen in signierten Cookie-Sessions und verursachen deshalb keine zusätzliche DB-Request-Schleife. Nach einem Deployment ist wegen des Session-Backend-Wechsels einmaliges erneutes Anmelden normal.
+### Verbindungsmodell ab Version 2.0.4
 
-Für Bot-Threads greift zusätzlich ein globaler Circuit-Breaker: Nach fünf koordinierten Fehlversuchen werden weitere DB-Operationen fünf Minuten lang sofort verworfen. Danach führt genau ein Thread einen Recovery-Versuch aus. Konfigurationen werden höchstens alle 30 Sekunden neu geladen und DataLogs standardmäßig nur alle 10 Sekunden je Symbol geschrieben; die Handelsauswertung läuft unabhängig davon weiter im gewählten Marktintervall. Diese Entkopplung reduziert die Last auf Free-Postgres, kann einen im Render-Dashboard gestoppten oder defekten Datastore aber nicht softwareseitig ersetzen.
+1. Alle Bot-ORM-Operationen laufen über einen eigenen Executor mit standardmäßig **einem** Worker. Damit kann der Bot nicht mehr für jeden `sync_to_async`-Thread eine zusätzliche PostgreSQL-Verbindung öffnen.
+2. Direkte Free-Postgres-Verbindungen verwenden `CONN_MAX_AGE=0`; Django schließt HTTP-, Task- und Bot-Verbindungen nach ihrer Arbeit, statt die knappen Slots 60 Sekunden pro Thread zu halten.
+3. Lokale Backtests laufen nacheinander statt parallel.
+4. Migrationen verwenden mit `USE_DIRECT_DATABASE_URL=True` die direkte URL.
+5. `DATABASE_POOL_URL` wird nur verwendet, wenn bei einer bezahlten Render-Datenbank PgBouncer aktiviert wurde. Render-Managed-Pooling ist für Free-Datenbanken nicht verfügbar.
+6. Ein alternativer DB-Host wird nur noch über `DATABASE_FALLBACK_HOST` verwendet; ein automatisch geratener Host ist entfernt.
 
-## 13. Render-Hinweise
+Bei einem DB-Ausfall zeigt das Webinterface HTTP 503 statt einer internen Fehlerseite. Das bereits geöffnete Dashboard stoppt weitere API-Aufrufe lokal, verdoppelt die Wartezeit bis maximal 60 Sekunden und lässt jeweils nur einen Recovery-Test zu. Login und Passphrase liegen in signierten Cookie-Sessions und verursachen deshalb keine zusätzliche DB-Request-Schleife.
+
+### Weiterhandel bei Frontend-/DB-Störung
+
+Der Trading-Thread ist vom Browser unabhängig. Schließt der Nutzer das Dashboard oder ist nur das Frontend nicht erreichbar, laufen Preisstream und Strategie weiter. Ist PostgreSQL vorübergehend ausgefallen, arbeitet der Bot mit der letzten erfolgreich validierten Konfiguration weiter:
+
+- Preisabfragen und Indikatorberechnung laufen weiter.
+- DataLogs dürfen während der Störung ausfallen; sie sind nicht orderkritisch.
+- Nicht speicherbare TradingLogs werden geordnet im RAM gepuffert.
+- Nach DB-Recovery werden bis zu 100 gepufferte Einträge je Zyklus atomar nachgeschrieben.
+- Der Dashboard-Status zeigt die Zahl der wartenden TradingLogs.
+- Bei 1.000 ungepufferten Logs blockiert t-bot neue, nicht mehr sicher journalisierbare Trades statt still Daten zu verlieren.
+
+Das RAM-Journal überlebt keinen kompletten Container-Neustart. Für garantierten 24/7-Betrieb sind deshalb ein externer Redis/Queue-Worker oder eine dauerhaft verfügbare Datenbank und ein bezahlter Render-Service erforderlich.
+
+Für Bot-Threads greift zusätzlich ein globaler Circuit-Breaker: Nach fünf koordinierten Fehlversuchen werden weitere DB-Operationen fünf Minuten lang sofort verworfen. Danach führt genau ein Thread einen Recovery-Versuch aus. Konfigurationen werden höchstens alle 30 Sekunden neu geladen und DataLogs standardmäßig nur alle 10 Sekunden je Symbol geschrieben.
+
+## 13. Integrierte Hilfe-Seite
+
+Unter **Hilfe** beziehungsweise `/help/` wird diese Datei direkt innerhalb der Anwendung gerendert. Die Seite enthält ein Inhaltsverzeichnis, formatierte Tabellen und Codebeispiele sowie eine Druckansicht. Dadurch bleibt die Dokumentation mit dem Repository identisch und muss nicht doppelt gepflegt werden.
+
+## 14. Render-Hinweise
 
 - Free-Web-Services schlafen bei Inaktivität ein; ein In-Process-Bot ist dort nicht garantiert 24/7 aktiv.
 - Free-Postgres läuft nach 30 Tagen ab.
 - Für produktiven Dauerbetrieb: bezahlter Web-Service, dauerhaftes PostgreSQL, Redis, separater Worker und Scheduler.
 - `/health/` bleibt absichtlich leichtgewichtig und öffentlich für Render.
 
-## 14. Sicherheits- und Risikocheckliste
+## 15. Sicherheits- und Risikocheckliste
 
 - Passphrase und Django `SECRET_KEY` niemals veröffentlichen.
 - Keine echten Exchange-Schlüssel verwenden, solange Feldverschlüsselung und ein echtes Order-Risikomodell nicht eingerichtet sind.

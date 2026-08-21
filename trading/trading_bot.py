@@ -4,6 +4,7 @@ import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from functools import wraps
 
@@ -39,6 +40,12 @@ _DB_RECOVERY_LOCK = threading.Lock()
 _DB_CIRCUIT_LOCK = threading.Lock()
 _DB_CIRCUIT_OPEN_UNTIL = 0.0
 _DB_CIRCUIT_LAST_ERROR = ""
+# Eigener kleiner ORM-Pool: keine Konkurrenz mit Daphne und höchstens die
+# konfigurierte Anzahl thread-lokaler Django-/Postgres-Verbindungen.
+_BOT_DB_EXECUTOR = ThreadPoolExecutor(
+    max_workers=settings.BOT_DB_WORKERS,
+    thread_name_prefix="bot-db",
+)
 
 
 def _db_circuit_remaining():
@@ -140,19 +147,19 @@ def db_safe(max_retries=None, base_delay=None, max_delay=None, suppress=False):
     return decorator
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe()
 def db_get_config(config_id):
     return Configuration.objects.get(id=config_id)
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe(suppress=True)
 def db_mark_bot_stopped(config_id):
     Configuration.objects.filter(id=config_id).update(is_running=False)
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe(suppress=True)
 def db_create_datalog_safe(**kwargs):
     try:
@@ -164,7 +171,7 @@ def db_create_datalog_safe(**kwargs):
         return False
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe(suppress=True)
 def db_trim_datalog(config_id, symbol, max_rows):
     queryset = DataLog.objects.filter(configuration_id=config_id, symbol=symbol)
@@ -175,7 +182,7 @@ def db_trim_datalog(config_id, symbol, max_rows):
         queryset.filter(id__lte=cutoff_id).delete()
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe(suppress=True)
 def db_create_tradinglog_safe(**kwargs):
     try:
@@ -187,7 +194,20 @@ def db_create_tradinglog_safe(**kwargs):
         return False
 
 
-@sync_to_async(thread_sensitive=False)
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
+@db_safe(suppress=True)
+def db_flush_tradinglogs_safe(payloads):
+    try:
+        with transaction.atomic():
+            for payload in payloads:
+                TradingLog.objects.create(**payload)
+        return True
+    except (IntegrityError, DataError, InvalidOperation, ValueError) as exc:
+        logger.error("Gepufferte TradingLogs konnten nicht gespeichert werden: %s", exc)
+        return False
+
+
+@sync_to_async(thread_sensitive=False, executor=_BOT_DB_EXECUTOR)
 @db_safe(suppress=True)
 def db_log_error(
     config_id,
@@ -248,6 +268,7 @@ class TradingBot(threading.Thread):
         self.symbols = []
         self.price_buffer = {}
         self.positions = {}
+        self.pending_trading_logs = []
         self.realized_pl = Decimal(0)
         self.last_error = None
         self.last_error_at = None
@@ -363,6 +384,18 @@ class TradingBot(threading.Thread):
             )
             self._persisted_errors[key] = (now, text)
 
+    async def flush_pending_trading_logs(self):
+        if not self.pending_trading_logs or _db_circuit_remaining():
+            return
+        batch = list(self.pending_trading_logs[:100])
+        if await db_flush_tradinglogs_safe(batch):
+            del self.pending_trading_logs[: len(batch)]
+            logger.info(
+                "Bot %s hat %s gepufferte TradingLogs nach DB-Recovery gespeichert",
+                self.config_id,
+                len(batch),
+            )
+
     async def _sleep(self, seconds):
         remaining = max(0, seconds)
         while remaining > 0 and self.running:
@@ -377,9 +410,15 @@ class TradingBot(threading.Thread):
                     time.monotonic() - self._last_config_refresh
                     >= settings.BOT_CONFIG_REFRESH_SECONDS
                 ):
-                    self.config = await db_get_config(self.config_id)
                     self._last_config_refresh = time.monotonic()
-                    self._sync_symbols()
+                    try:
+                        self.config = await db_get_config(self.config_id)
+                        self._sync_symbols()
+                    except (OperationalError, InterfaceError):
+                        # Mit der letzten validierten Konfiguration weiterlaufen.
+                        # Preisstream und Strategie hängen nicht vom Frontend ab.
+                        pass
+                await self.flush_pending_trading_logs()
                 try:
                     tickers = await self.fetch_tickers(self.symbols)
                 except Exception as exc:
@@ -472,8 +511,9 @@ class TradingBot(threading.Thread):
                         )
                 if any_success:
                     self.last_success_at = time.time()
-                    self.last_error = None
-                    self.last_error_at = None
+                    if not self.pending_trading_logs:
+                        self.last_error = None
+                        self.last_error_at = None
                     self._rate_limit_delay = 0
                 await self._sleep(max(1, self.config.time_interval))
             except ObjectDoesNotExist:
@@ -665,29 +705,46 @@ class TradingBot(threading.Thread):
         # `current_capital` ist der verfügbare Cash-Kontostand. Bei einem Buy
         # muss der gebundene Positionswert inklusive Kaufgebühr sofort sinken.
         current_capital = self._available_capital()
-        saved = await db_create_tradinglog_safe(
-            configuration_id=self.config_id,
-            symbol=symbol,
-            action=side,
-            price=_bounded(price),
-            amount=_bounded(amount),
-            fee_amount=_bounded(fee),
-            pl_nominal=_bounded(pl_nominal),
-            pl_relative=_bounded(pl_nominal / return_basis * 100 if return_basis else 0),
-            total_pl=_bounded(self.realized_pl),
-            current_capital=_bounded(current_capital),
-            tank=_bounded(self.realized_pl),
-            order_id=f"paper_{side}_{time.time_ns()}",
-        )
+        payload = {
+            "configuration_id": self.config_id,
+            "symbol": symbol,
+            "action": side,
+            "price": _bounded(price),
+            "amount": _bounded(amount),
+            "fee_amount": _bounded(fee),
+            "pl_nominal": _bounded(pl_nominal),
+            "pl_relative": _bounded(pl_nominal / return_basis * 100 if return_basis else 0),
+            "total_pl": _bounded(self.realized_pl),
+            "current_capital": _bounded(current_capital),
+            "tank": _bounded(self.realized_pl),
+            "order_id": f"paper_{side}_{time.time_ns()}",
+        }
+        saved = await db_create_tradinglog_safe(**payload)
         if not saved:
-            # Der In-Memory-Stand darf der DB bei einem Schreibfehler nicht
-            # davonlaufen. Ein fehlgeschlagener Sell wird wiederhergestellt.
-            if side == "sell":
-                self.realized_pl -= pl_nominal
-                self.positions[symbol] = position
-            else:
-                self.positions.pop(symbol, None)
-            raise RuntimeError("Trade konnte nicht gespeichert werden")
+            if len(self.pending_trading_logs) >= 1000:
+                # Ohne dauerhaftes Journal wäre weiteres Handeln nicht mehr
+                # rekonstruierbar. Erst bei vollem Puffer den letzten Trade
+                # sicher zurückrollen und weitere Orders blockieren.
+                if side == "sell":
+                    self.realized_pl -= pl_nominal
+                    self.positions[symbol] = position
+                else:
+                    self.positions.pop(symbol, None)
+                raise RuntimeError(
+                    "DB-Trade-Puffer voll; weiterer Handel sicherheitshalber blockiert"
+                )
+            self.pending_trading_logs.append(payload)
+            self.last_error = (
+                f"DB offline: {len(self.pending_trading_logs)} Trade-Logs gepuffert; "
+                "Marktdaten und Paper-Handel laufen weiter"
+            )
+            self.last_error_at = time.time()
+            if len(self.pending_trading_logs) == 1 or len(self.pending_trading_logs) % 100 == 0:
+                logger.warning(
+                    "Bot %s puffert %s TradingLogs im RAM",
+                    self.config_id,
+                    len(self.pending_trading_logs),
+                )
         if side == "sell" and self.config.countdown_reset_indicators:
             self.price_buffer[symbol] = []
 
@@ -846,6 +903,7 @@ class TradingBotManager:
                 "last_error": None,
                 "last_error_at": None,
                 "last_success_at": None,
+                "pending_trading_logs": 0,
             }
         return {
             "running": True,
@@ -854,6 +912,7 @@ class TradingBotManager:
             "last_error": bot.last_error,
             "last_error_at": bot.last_error_at,
             "last_success_at": bot.last_success_at,
+            "pending_trading_logs": len(bot.pending_trading_logs),
         }
 
 

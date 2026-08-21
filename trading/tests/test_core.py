@@ -274,6 +274,12 @@ class ViewSecurityTests(TestCase):
         )
         self.client.force_login(self.user)
 
+    def test_help_page_renders_manual(self):
+        response = self.client.get(reverse("help"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Benutzer- und Indikatorhandbuch")
+        self.assertContains(response, "Verbindungsmodell ab Version 2.0.4")
+
     def test_inactive_configuration_is_visible_on_dashboard(self):
         response = self.client.get(reverse("dashboard"), {"config_id": self.config.id})
         self.assertEqual(response.status_code, 200)
@@ -467,6 +473,18 @@ class TradingBotTests(TransactionTestCase):
             fee=Decimal("0.1"),
             countdown=0,
         )
+
+    def test_trade_is_buffered_and_position_kept_during_db_outage(self):
+        bot = TradingBot(self.config)
+        bot.price_buffer["BTC/USDT"] = [Decimal(100)]
+        with patch(
+            "trading.trading_bot.db_create_tradinglog_safe",
+            new=AsyncMock(return_value=None),
+        ):
+            async_to_sync(bot.execute_trade)("BTC/USDT", "buy")
+        self.assertIn("BTC/USDT", bot.positions)
+        self.assertEqual(len(bot.pending_trading_logs), 1)
+        self.assertEqual(bot.pending_trading_logs[0]["action"], "buy")
 
     def test_kill_switch_uses_fresh_ticker_and_closes_every_position(self):
         bot = TradingBot(self.config)

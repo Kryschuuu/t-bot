@@ -209,20 +209,24 @@ WSGI_APPLICATION = "trading_bot_project.wsgi.application"
 # ---------------------------------------------------------------------------
 # Datenbank
 # ---------------------------------------------------------------------------
-# Render stellt bei verknuepfter Postgres-Instanz automatisch DATABASE_URL
-# bereit. Lokal faellt die App auf SQLite zurueck, falls nichts gesetzt ist.
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Zur Laufzeit wird Render PgBouncer (`connectionPoolString`) bevorzugt. Der
+# direkte URL bleibt ausschließlich für Migrationen/Diagnose verfügbar.
+DIRECT_DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_POOL_URL = os.environ.get("DATABASE_POOL_URL")
+USE_DIRECT_DATABASE_URL = env_bool("USE_DIRECT_DATABASE_URL", False)
+DATABASE_URL = (
+    DIRECT_DATABASE_URL if USE_DIRECT_DATABASE_URL or not DATABASE_POOL_URL else DATABASE_POOL_URL
+)
 if DATABASE_URL:
     database_config = dj_database_url.parse(
         DATABASE_URL,
-        # Kurze Lebensdauer + Health-Check verhindern die Wiederverwendung
-        # serverseitig geschlossener Render-Postgres-Verbindungen.
-        conn_max_age=60,
+        # Direkte Free-Postgres-Verbindungen am Request-/Task-Ende schließen,
+        # damit die wenigen Server-Slots nie durch Thread-Locals belegt bleiben.
+        # Ein optionaler bezahlter PgBouncer darf dagegen wiederverwendet werden.
+        conn_max_age=60 if DATABASE_POOL_URL and not USE_DIRECT_DATABASE_URL else 0,
         conn_health_checks=True,
         ssl_require=env_bool("DATABASE_SSL_REQUIRE", True),
     )
-    # libpq erkennt tote TCP-Verbindungen zeitnah. `connect_timeout` begrenzt
-    # insbesondere DNS-/Connect-Hänger während eines Datastore-Neustarts.
     database_config.setdefault("OPTIONS", {}).update(
         {
             "connect_timeout": 10,
@@ -231,17 +235,15 @@ if DATABASE_URL:
             "keepalives_interval": 10,
             "keepalives_count": 3,
             "tcp_user_timeout": 30_000,
+            "application_name": "t-bot-web" if not USE_DIRECT_DATABASE_URL else "t-bot-migrate",
         }
     )
-    # Render-Private-DNS kann bei Free-Postgres-Neustarts kurz ausfallen. libpq
-    # unterstützt Hostlisten und versucht dann denselben Datastore über dessen
-    # TLS-geschützten externen Host. Explizites DATABASE_FALLBACK_HOST gewinnt.
-    primary_host = database_config.get("HOST", "")
+    # Nur ein explizit geprüfter Fallback wird verwendet. Das frühere Ableiten
+    # eines externen Hosts wurde entfernt: Es verdoppelte fehlgeschlagene
+    # Handshakes, wenn der Datastore selbst keine Slots mehr hatte.
     fallback_host = os.environ.get("DATABASE_FALLBACK_HOST", "").strip()
-    if not fallback_host and env_bool("RENDER", False) and primary_host and "." not in primary_host:
-        render_db_region = os.environ.get("RENDER_POSTGRES_REGION", "frankfurt").strip()
-        fallback_host = f"{primary_host}.{render_db_region}-postgres.render.com"
-    if fallback_host and fallback_host != primary_host:
+    if fallback_host and USE_DIRECT_DATABASE_URL:
+        primary_host = database_config.get("HOST", "")
         database_config["HOST"] = f"{primary_host},{fallback_host}"
     DATABASES = {"default": database_config}
 else:
@@ -343,6 +345,7 @@ DB_RECONNECT_MAX_RETRIES = env_int("DB_RECONNECT_MAX_RETRIES", 5, minimum=1)
 DB_RECONNECT_BASE_DELAY = env_float("DB_RECONNECT_BASE_DELAY", 1.0)
 DB_RECONNECT_MAX_DELAY = env_float("DB_RECONNECT_MAX_DELAY", 30.0)
 DB_CIRCUIT_BREAKER_SECONDS = env_int("DB_CIRCUIT_BREAKER_SECONDS", 300, minimum=30)
+BOT_DB_WORKERS = env_int("BOT_DB_WORKERS", 1, minimum=1)
 MAX_DATA_LOGS_PER_SYMBOL = env_int("MAX_DATA_LOGS_PER_SYMBOL", 20_000, minimum=1_000)
 DATA_LOG_CLEANUP_EVERY = env_int("DATA_LOG_CLEANUP_EVERY", 500, minimum=10)
 DATA_LOG_WRITE_INTERVAL_SECONDS = env_int("DATA_LOG_WRITE_INTERVAL_SECONDS", 10, minimum=2)

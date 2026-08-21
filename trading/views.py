@@ -7,8 +7,10 @@ import re
 import threading
 from collections import Counter, defaultdict
 from decimal import Decimal
+from functools import lru_cache
 from io import BytesIO
 
+import markdown
 from asgiref.sync import async_to_sync
 from celery.result import AsyncResult
 from django.conf import settings
@@ -24,6 +26,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.utils.safestring import mark_safe
 from django.views.decorators.http import require_GET, require_POST
 
 from .forms import (
@@ -159,6 +162,25 @@ def calculate_performance_metrics(logs):
 @require_GET
 def health_view(request):
     return JsonResponse({"status": "ok", "version": settings.APP_VERSION})
+
+
+@lru_cache(maxsize=1)
+def _render_manual():
+    source = (settings.BASE_DIR / "MANUAL.md").read_text(encoding="utf-8")
+    return markdown.markdown(
+        source,
+        extensions=["extra", "fenced_code", "tables", "toc", "sane_lists"],
+        output_format="html5",
+    )
+
+
+@require_GET
+def help_view(request):
+    return render(
+        request,
+        "trading/help.html",
+        {"manual_html": mark_safe(_render_manual()), "version": settings.APP_VERSION},
+    )
 
 
 def home(request):

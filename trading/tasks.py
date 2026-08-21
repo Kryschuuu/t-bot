@@ -19,6 +19,7 @@ _MAX_TOTAL_COMBINATIONS = 20_000
 _MAX_BACKTEST_PRICE_POINTS = 5_000
 _LOCAL_TASK_IDS = set()
 _LOCAL_TASK_IDS_LOCK = threading.Lock()
+_LOCAL_TASK_SEMAPHORE = threading.Semaphore(1)
 
 
 class _EagerAsyncResultStub:
@@ -41,12 +42,15 @@ def dispatch_task(task, *args, **kwargs):
         def run_in_thread():
             close_old_connections()
             try:
-                task.apply(
-                    args=args,
-                    kwargs=kwargs,
-                    task_id=synthetic_id,
-                    throw=True,
-                )
+                # Free-Tier: nur ein lokaler Task gleichzeitig. Das begrenzt
+                # CPU, RAM und zusätzliche Django/Postgres-Verbindungen.
+                with _LOCAL_TASK_SEMAPHORE:
+                    task.apply(
+                        args=args,
+                        kwargs=kwargs,
+                        task_id=synthetic_id,
+                        throw=True,
+                    )
             except Exception:
                 logger.exception("Hintergrund-Task %s ist fehlgeschlagen", task.name)
             finally:
