@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mock redis-cli: gibt PONG aus, wenn "ping" aufgerufen wird.
+case "$*" in
+  *"ping"*) echo "PONG" ;;
+  *)        echo "OK" ;;
+esac
+exit 0

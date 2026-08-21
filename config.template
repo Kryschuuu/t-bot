@@ -1,0 +1,86 @@
+# ============================================================================
+# config.template - Template fuer eine optimierte lokale t-bot-Konfiguration
+#
+# Diese Datei dokumentiert alle Variablen, die von hardware-test.sh und
+# install.sh automatisch gesetzt werden koennen. Kopiere die Datei nach
+# config/local.env (wird von install.sh bereits automatisch erzeugt) und
+# passe die Werte bei Bedarf an.
+#
+# Laden:  set -a; . ./config/local.env; set +a
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Render.com-Simulation
+# ----------------------------------------------------------------------------
+# Standardmaessig deaktiviert, damit das lokale Setup unbeeinflusst bleibt.
+# Auf True setzen, um die Free-Tier-Resource-Limits zu simulieren.
+RENDER=False
+RENDER_SIMULATION=False
+
+# ----------------------------------------------------------------------------
+# Django / App
+# ----------------------------------------------------------------------------
+DEBUG=True
+SECRET_KEY=replace-with-a-long-random-string
+PASSPHRASE=replace-with-a-private-passphrase
+PASSPHRASE_GATE_ENABLED=True
+AUTOSTART_BOTS=True
+
+# ----------------------------------------------------------------------------
+# Datenbank / Redis
+# ----------------------------------------------------------------------------
+# Ohne DATABASE_URL nutzt die App SQLite. Docker Compose verwendet PostgreSQL.
+# DATABASE_URL=postgresql://tbot:tbot-local-password@localhost:5432/tbot
+REDIS_URL=redis://127.0.0.1:6379/0
+DATABASE_SSL_REQUIRE=False
+
+# Anzahl der Threads im internen DB-Executor (empfohlen: nproc/2, 1..8).
+BOT_DB_WORKERS=2
+# Empfohlene Groesse des Connection-Pools (BOT_DB_WORKERS * 4, 4..32).
+DB_POOL_SIZE=8
+# Anzahl der Daphne/ASGI-Prozesse (nur bei Mehrkern-Systemen relevant).
+WEB_CONCURRENCY=2
+
+# ----------------------------------------------------------------------------
+# Redis-Tuning (durch hardware-test.sh gesetzt)
+# ----------------------------------------------------------------------------
+REDIS_MAXMEMORY_MB=128
+REDIS_MAXMEMORY_POLICY=noeviction
+REDIS_IO_THREADS=1
+# Compose-Memory-Limit fuer den Redis-Container.
+REDIS_MEMORY=96m
+# Alternativer Override in der dem Entrypoint gewohnten Form (z.B. "96mb").
+# REDIS_MAXMEMORY=48mb
+
+# ----------------------------------------------------------------------------
+# PostgreSQL-Tuning (durch hardware-test.sh gesetzt)
+# ----------------------------------------------------------------------------
+POSTGRES_MAX_CONNECTIONS=40
+POSTGRES_SHARED_BUFFERS_MB=32
+POSTGRES_EFFECTIVE_CACHE_MB=128
+POSTGRES_WORK_MEM_MB=4
+# Compose-Memory-Limit fuer den Postgres-Container.
+POSTGRES_MEMORY=256m
+
+# ----------------------------------------------------------------------------
+# CPU-Architektur (wird von hardware-test.sh normalisiert)
+# ----------------------------------------------------------------------------
+CPU_ARCH=amd64
+CPU_HASHRATE_MBPS=0
+
+# ----------------------------------------------------------------------------
+# Celery / Worker
+# ----------------------------------------------------------------------------
+CELERY_LOG_LEVEL=INFO
+# Maximale Resident-Set-Groesse pro Worker-Child in KB. Bei Speichermangel
+# herabsetzen, bei viel RAM auf 512000/768000 erhoehen.
+CELERY_WORKER_MAX_MEMORY_PER_CHILD=384000
+
+# ----------------------------------------------------------------------------
+# Docker-Compose-CPU-Limits (Bruchteile eines logischen Kerns)
+# ----------------------------------------------------------------------------
+WEB_CPUS=0.50
+WORKER_CPUS=0.50
+POSTGRES_CPUS=0.50
+REDIS_CPUS=0.20
+SCHEDULER_CPUS=0.20

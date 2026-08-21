@@ -13,45 +13,96 @@ x-app-environment: &app-environment
   AUTOSTART_BOTS: ${AUTOSTART_BOTS:-True}
   CELERY_WORKER_MAX_MEMORY_PER_CHILD: "384000"
 
+# Gemeinsam genutzter Ordner fuer die vom `tuner`-Container generierte
+# Hardware-Optimierungsdatei. Wird von allen App-Containern gemountet.
+x-tuning-volume: &tuning-volume
+  - tuning_runtime:/tbot-runtime:ro
+
 services:
+  # --------------------------------------------------------------------------
+  # One-Shot: Hardware-Analyse & Tuning-Datei generieren.
+  # Laeuft VOR redis/postgres/web/worker/beat und schreibt tuning.env in das
+  # gemeinsame Volume. Alle nachfolgenden Container lesen diese Werte und
+  # passen Redis-Parameter, Worker-Speicher, DB-Pools und CPU-Limits an.
+  # --------------------------------------------------------------------------
+  tuner:
+    build: .
+    image: t-bot-local-app
+    init: true
+    command: ["/app/docker/tuner-entrypoint.sh"]
+    environment:
+      <<: *app-environment
+    volumes:
+      - tuning_runtime:/tbot-runtime
+    restart: "no"
+
   postgres:
     image: postgres:17-alpine
+    # Der Custom-Entrypoint liest /tbot-runtime/tuning.env und uebergibt die
+    # automatisch berechneten Werte (max_connections, shared_buffers,
+    # effective_cache_size, work_mem) als postgres -c Argumente.
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres-entrypoint.sh"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-tbot}
       POSTGRES_USER: ${POSTGRES_USER:-tbot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tbot-local-password}
+      # Override in .env moeglich; werden vom Tuner sonst ueberschrieben.
+      POSTGRES_MAX_CONNECTIONS: ${POSTGRES_MAX_CONNECTIONS:-40}
+      POSTGRES_SHARED_BUFFERS_MB: ${POSTGRES_SHARED_BUFFERS_MB:-32}
+      POSTGRES_EFFECTIVE_CACHE_MB: ${POSTGRES_EFFECTIVE_CACHE_MB:-128}
+      POSTGRES_WORK_MEM_MB: ${POSTGRES_WORK_MEM_MB:-4}
     volumes:
+      - ./docker/postgres-entrypoint.sh:/usr/local/bin/postgres-entrypoint.sh:ro
       - postgres_data:/var/lib/postgresql/data
+      - tuning_runtime:/tbot-runtime:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tbot} -d ${POSTGRES_DB:-tbot}"]
       interval: 3s
       timeout: 3s
       retries: 20
-    mem_limit: 256m
+    mem_limit: ${POSTGRES_MEMORY:-256m}
     cpus: "${POSTGRES_CPUS:-0.50}"
     restart: unless-stopped
+    depends_on:
+      tuner:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7.4-alpine
-    command: redis-server --save "" --appendonly no --maxmemory 48mb --maxmemory-policy noeviction
+    # Der Custom-Entrypoint liest /tbot-runtime/tuning.env und startet
+    # redis-server mit den automatisch berechneten Werten fuer maxmemory,
+    # maxmemory-policy und io-threads.
+    entrypoint: ["/bin/sh", "/usr/local/bin/redis-entrypoint.sh"]
+    environment:
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-48mb}
+    volumes:
+      - ./docker/redis-entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
+      - tuning_runtime:/tbot-runtime:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       timeout: 3s
       retries: 20
-    mem_limit: 64m
+    mem_limit: ${REDIS_MEMORY:-96m}
     cpus: "${REDIS_CPUS:-0.20}"
     restart: unless-stopped
+    depends_on:
+      tuner:
+        condition: service_completed_successfully
 
   web:
     build: .
+    image: t-bot-local-app
     init: true
     environment:
       <<: *app-environment
       PORT: "8000"
     ports:
       - "${WEB_PORT:-8000}:8000"
+    volumes: *tuning-volume
     depends_on:
+      tuner:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -67,13 +118,17 @@ services:
 
   backtest-worker:
     build: .
+    image: t-bot-local-app
     init: true
     command: /app/docker/worker-entrypoint.sh
     environment:
       <<: *app-environment
       AUTOSTART_BOTS: "False"
       CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-INFO}
+    volumes: *tuning-volume
     depends_on:
+      tuner:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -94,6 +149,7 @@ services:
 
   scheduler:
     build: .
+    image: t-bot-local-app
     init: true
     profiles: ["scheduler"]
     command: /app/docker/beat-entrypoint.sh
@@ -101,7 +157,10 @@ services:
       <<: *app-environment
       AUTOSTART_BOTS: "False"
       CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-INFO}
+    volumes: *tuning-volume
     depends_on:
+      tuner:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -112,3 +171,4 @@ services:
 
 volumes:
   postgres_data:
+  tuning_runtime:

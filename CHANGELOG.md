@@ -2,6 +2,27 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.3.0] – 2026-08-22
+
+### Universelles Build-/Install-Skript und automatische Hardware-Optimierung
+
+- `install.sh` ist das neue Distributions-agnostische Build- und Installationsskript. Es erkennt die Linux-Distribution über `/etc/os-release` (inkl. Fallbacks) und wählt automatisch den passenden Paketmanager: `apt` für Debian/Ubuntu, `pacman` für Arch/Manjaro, `dnf`/`yum` für RHEL/CentOS/Fedora/Rocky/Alma/Amazon Linux, `zypper` für openSUSE/SLES und `apk` für Alpine (mit automatischer EPEL-Aktivierung unter RHEL-Derivaten, wo Redis benötigt wird).
+- Vollständiges Paket-Mapping für Redis, Python 3, Build-Toolchain, PostgreSQL-Header und die nativen WeasyPrint/Pango/Harfbuzz-Laufzeitbibliotheken pro Paketmanager.
+- Redis wird als lokaler Service eingerichtet (systemd/OpenRC/`service`), beim Start aktiviert, per `redis-cli PING` auf Verfügbarkeit geprüft und bei Fehlschlag automatisch neu gestartet.
+- Modi `--mode=auto|host|container` und Profile `--profile=full|runtime`; `auto` erkennt Docker/Podman/LXC-Container über `/.dockerenv`, `/proc/1/cgroup` und `/run/.containerenv`. Im Container-Modus wird kein sudo benötigt und keine Service-Verwaltung versucht.
+- Privilegien-Prüfung: Nicht-root-Ausführung im Host-Modus re-exec'd sich selbst mit `sudo -E` und Array-Argumenten (kein Word-Splitting).
+- `hardware-test.sh` vermisst CPU (`nproc`, `/proc/cpuinfo`, `uname -m` inkl. Normalisierung auf `amd64`/`arm64`/`arm/v7`/`ppc64le`/`s390x`/`riscv64`), RAM (`/proc/meminfo` mit `free`-Fallback), freien Plattenspeicher, Disk-I/O (64-MB-`dd`-Schreib-/Lesetest mit portabler `1M`-Blockgröße), CPU-SHA-256-Hashrate und fsync-Latenz. Daraus wird eine Heuristik für Redis `maxmemory`/`maxmemory-policy`/`io-threads`, `BOT_DB_WORKERS`, `DB_POOL_SIZE`, `WEB_CONCURRENCY`, `CELERY_WORKER_MAX_MEMORY_PER_CHILD`, die Docker-Compose-CPU-Limits sowie **PostgreSQL**-Werte (`max_connections`, `shared_buffers`, `effective_cache_size`, `work_mem`) berechnet. Ausgaben in `env` (sourcbar), `json` und `text`.
+- `docker/postgres-entrypoint.sh` übergibt die berechneten PostgreSQL-Tuneables als `-c`-Argumente an den Server; Redis- und Postgres-Container unterstützen sowohl die Tuning-Datei als auch Overrides über `REDIS_MAXMEMORY`/`POSTGRES_*`-Umgebungsvariablen aus `.env.local`.
+- `scripts/setup_local.sh` als Ein-Schritt-Setup: prüft Docker/Compose, führt `hardware-test.sh` aus, schreibt `.env.local` im Mode 0600 und behält bereits vorhandene `SECRET_KEY`/`PASSPHRASE`/`POSTGRES_PASSWORD` beim Retuning bei, bevor der Stack mit `docker compose up --build -d` startet. `--install-deps` ruft bei Bedarf `install.sh` auf, `--render-free-simulation` aktiviert die Render-Free-CPU-Simulation, `--no-up` erzeugt nur die Konfiguration.
+- Render.com-Simulation ist in der erzeugten `config/local.env` standardmäßig deaktiviert (`RENDER=False`, `RENDER_SIMULATION=False`), kann über `--render-simulation` oder nachträglich in der Config aktiviert werden, ohne das lokale Setup zu beeinträchtigen.
+- Docker-Integration: Beim `docker compose up --build` führt ein neuer One-Shot-`tuner`-Service (`docker/tuner-entrypoint.sh`) `hardware-test.sh` aus und schreibt `tuning.env` in ein gemeinsam genutztes Volume. Redis (`docker/redis-entrypoint.sh`) startet mit den automatisch berechneten Flags; Web/Worker/Beat-Sourcen (`docker/load-tuning.sh`) übernehmen die empfohlenen Werte. Alle App-Services warten auf `tuner: service_completed_successfully`.
+- `Dockerfile` führt im Build `install.sh --mode=container --profile=runtime` aus, mit sicherem apt-Fallback für restriktive Build-Umgebungen.
+- `config.template` dokumentiert alle optimierbaren Variablen mit Defaults und Wertebereichen.
+- Test-Suite unter `tests/` mit Runner, Test-Helfer und Mock-Binaries: sechs Test-Dateien decken Distro-Erkennung (acht `/etc/os-release`-Fixtures inkl. Alpine und openSUSE), Paketmanager-Aufrufe (apt/pacman/dnf/yum/zypper/apk-Mocks), Redis-Verfügbarkeit, Hardware-Heuristik (1/4/16 GB-Szenarien, Architektur-Normalisierung, PostgreSQL-Tuning) und Konfigurationsgenerierung (Mode 600, Idempotenz, Secret-Key-Länge, deaktivierte Render-Simulation) ab. `tests/distro_smoke_test.sh` baut optionale Debian/Arch/Fedora-Docker-Images, wenn Docker lokal verfügbar ist.
+- ShellCheck 0.11.0 ist fehlerfrei für alle Produktiv- und Testskripte; `set -euo pipefail`, Input-Validierung, `mktemp`-Temporärdateien mit `trap`-Cleanup, keine Hardcoded-Credentials.
+- `README.md` um Abschnitte zur automatischen Installation, Hardware-Optimierung, Render-Simulation, Docker-Tuning-Fluss und Test-Ausführung erweitert.
+- `PEER_REVIEW.md` dokumentiert das Selbst-Review mit Checklisten für Sicherheit, Performance, Kompatibilität und Code-Qualität sowie das vollständige Paket-Mapping.
+
 ## [2.2.0] – 2026-08-21
 
 ### Produktionsreifes lokales Backtesting-Setup
