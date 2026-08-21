@@ -128,6 +128,10 @@ BACKTEST_LOCAL_FALLBACK_ENABLED = env_bool(
     default=not env_bool("RENDER", False),
 )
 BACKTEST_EXECUTION_AVAILABLE = bool(REDIS_URL) or BACKTEST_LOCAL_FALLBACK_ENABLED
+BACKTEST_DEFAULT_PRICE_POINTS = min(
+    5_000,
+    env_int("BACKTEST_DEFAULT_PRICE_POINTS", 5_000, minimum=100),
+)
 
 # ---------------------------------------------------------------------------
 # Security Header (nur wenn nicht DEBUG)

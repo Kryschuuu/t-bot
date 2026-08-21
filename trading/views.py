@@ -1091,7 +1091,7 @@ def backtesting_form(request, config_id):
         "take_profit": float(config.take_profit),
         "stop_loss": float(config.stop_loss),
         "fee": float(config.fee),
-        "max_price_points": 5_000,
+        "max_price_points": settings.BACKTEST_DEFAULT_PRICE_POINTS,
     }
     form = BacktestForm(
         request.POST or None,

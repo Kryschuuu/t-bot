@@ -1,6 +1,6 @@
 # Backtesting – Machbarkeitsstudie und Produktionsarchitektur
 
-**Stand:** 21. August 2026 · **Version:** 2.2.0
+**Stand:** 21. August 2026 · **Version:** 2.3.0
 
 ## Executive Summary
 
@@ -159,3 +159,9 @@ Der isolierte Standalone-Kern blieb deutlich unter 384 MB; der Eltern-Heartbeat 
 - Celery-Eager bleibt ausschließlich lokales Entwicklerwerkzeug.
 - Ressourcenlimits sind sowohl formularseitig, algorithmisch als auch auf Worker-Ebene vorhanden.
 - Die Lösung verändert TradingBot-, Binance-WebSocket- und Dashboard-Prozesse nicht.
+
+## 9. Lokale Plattformportabilität
+
+`scripts/install_system_dependencies.sh` trennt Host-Bootstrap vom Debian-basierten Multi-Arch-Container. Der Hostinstaller erkennt apt, pacman, dnf/yum, zypper oder apk; Docker baut anschließend dasselbe reproduzierbare Image nativ für amd64, arm64, arm/v7, ppc64le oder s390x. Der Container bleibt dadurch unabhängig von den Paketnamen des Hosts.
+
+`scripts/tune_local_hardware.py` misst CPU, RAM, Datenträger und Architektur. Die resultierende `.env.local` dimensioniert getrennte CPU-/RAM-Cgroups, Redis-Maxmemory, PostgreSQL-Cache, DataLog-Intervall und Standard-Preispunktzahl. Die Render-Free-Simulation ist ein expliziter Opt-in und beeinflusst normale lokale Profile nicht.
