@@ -20,6 +20,18 @@ Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projek
 - ShellCheck 0.11.0 ist fehlerfrei für alle Produktiv- und Testskripte; `set -euo pipefail`, Input-Validierung, `mktemp`-Temporärdateien mit `trap`-Cleanup, keine Hardcoded-Credentials.
 - `README.md` um Abschnitte zur automatischen Installation, Hardware-Optimierung, Render-Simulation, Docker-Tuning-Fluss und Test-Ausführung erweitert.
 - `PEER_REVIEW.md` dokumentiert das Selbst-Review mit Checklisten für Sicherheit, Performance, Kompatibilität und Code-Qualität sowie das vollständige Paket-Mapping.
+## [2.3.0] – 2026-08-21
+
+### Distributions- und hardwareunabhängiges Local Setup
+
+- Automatischer Systeminstaller für apt, pacman, dnf/yum, zypper und apk einschließlich Debian/Ubuntu, Arch, Fedora/RHEL-Derivate, openSUSE und Alpine.
+- Native Architekturerkennung für amd64, arm64, arm/v7, ppc64le und s390x.
+- Ein-Schritt-Setup `scripts/setup_local.sh` installiert bei Bedarf Docker, führt Hardwaretests durch, baut Images und startet den isolierten Stack.
+- Hardwareprobe misst CPU-Hashrate, RAM, freien Datenträger und fsync-Schreibrate; daraus werden CPU-/RAM-Grenzen, Redis-Maxmemory und PostgreSQL-Cachewerte generiert.
+- Render-Free-Simulation ist standardmäßig deaktiviert und nur über `--render-free-simulation` aktivierbar.
+- Compose-PostgreSQL erhält begrenzte Verbindungen und hardwareabhängige Cacheparameter; Redis läuft mit hardwareabhängigem `maxmemory`.
+- Sicherheitsmodus 0600 für generierte `.env.local`, bestehende Secrets werden beim Retuning beibehalten.
+- Dry-Run-Tests für alle Paketmanager-Familien und deterministische Unit-Tests für Hardwareprofile ergänzt.
 
 ## [2.2.0] – 2026-08-21
 

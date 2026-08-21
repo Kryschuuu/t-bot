@@ -1,23 +1,53 @@
 # Lokale Entwicklungsumgebung
 
-## 1. Voraussetzungen
+## 1. Voraussetzungen und automatische Installation
 
-- Docker Engine mit Compose v2
-- mindestens 2 GB freier RAM
+- mindestens 2 GB RAM
 - freie TCP-Ports 8000 (Web) und interne Docker-Netze
+- Linux mit apt, pacman, dnf/yum, zypper oder apk; macOS/Windows verwenden Docker Desktop
 
-## 2. Konfiguration
+Linux-Komplettsetup:
 
 ```bash
-cp .env.docker.example .env
+scripts/setup_local.sh --install-deps
 ```
 
-Mindestens `SECRET_KEY`, `PASSPHRASE` und `POSTGRES_PASSWORD` in `.env` ändern. Die Datei `.env` ist durch `.gitignore` ausgeschlossen.
+Vorher gefahrlos prüfen:
+
+```bash
+scripts/install_system_dependencies.sh --dry-run
+scripts/setup_local.sh --dry-run
+```
+
+`scripts/install_system_dependencies.sh` erkennt Distribution, Paketmanager und CPU-Architektur automatisch. Unterstützt werden Debian/Ubuntu, Arch/Manjaro, Fedora, RHEL/CentOS/Rocky/Alma, openSUSE und Alpine. Installiert werden Docker/Compose, Python-Werkzeuge sowie Pango/Harfbuzz/JPEG/PostgreSQL-Client für native Diagnose. Mit `--dry-run` werden nur die Befehle ausgegeben.
+
+## 2. Automatische Hardwareoptimierung
+
+```bash
+python3 scripts/tune_local_hardware.py --output .env.local
+```
+
+Der Test misst CPU-Hashrate, sequenzielle Schreibrate, RAM, freien Datenträger und Architektur. Daraus entstehen CPU-/RAM-Limits für alle Compose-Services, Redis-Maxmemory, PostgreSQL-Cachewerte, das lokale DataLog-Schreibintervall und ein sinnvoller Standardwert von 2.500 oder 5.000 Backtest-Preispunkten. Bestehende Secrets in `.env.local` bleiben erhalten; neue Dateien erhalten Modus 0600.
+
+Die Render-Free-Simulation ist standardmäßig **aus**. Nur explizit aktivieren:
+
+```bash
+scripts/setup_local.sh --render-free-simulation
+```
 
 ## 3. Start
 
+Ein-Schritt-Setup mit nativer Hardwareoptimierung:
+
 ```bash
-docker compose up --build -d
+scripts/setup_local.sh
+```
+
+Oder manuell:
+
+```bash
+cp .env.docker.example .env.local
+docker compose --env-file .env.local up --build -d
 ```
 
 Beim Build laeuft `install.sh` im Container-Modus und installiert die zur
@@ -28,6 +58,7 @@ ein gemeinsam genutztes Volume. Redis startet daraufhin mit berechneten
 Werten fuer `maxmemory`, `maxmemory-policy` und `io-threads`; Web, Worker
 und Beat uebernehmen die empfohlenen Werte fuer Worker-Threads,
 Connection-Pools und Speicher-Limits.
+Mindestens `SECRET_KEY`, `PASSPHRASE` und `POSTGRES_PASSWORD` ändern. `.env.local` ist durch `.gitignore` ausgeschlossen.
 
 Services:
 
@@ -38,6 +69,10 @@ Services:
 | `backtest-worker` | ausschließlich Queue `backtest` | 512-MB-Container, 384-MB-Celery-Child, Concurrency 1 |
 | `redis` | Broker/Result Backend | 64 MB, keine Persistenz fuer lokale Entwicklung |
 | `postgres` | lokale persistente DB | 256 MB |
+| `web` | Django, Daphne, WebSockets, TradingBot | hardwareabhängige CPU/RAM-Cgroup |
+| `backtest-worker` | ausschließlich Queue `backtest` | eigene Cgroup, 384-MB-Celery-Child, Concurrency 1 |
+| `redis` | Broker/Result Backend | hardwareabhängiges Maxmemory, keine lokale Persistenz |
+| `postgres` | lokale persistente DB | max. 40 Verbindungen, abgestimmte Cachewerte |
 | `scheduler` | optional Celery Beat | nur Profil `scheduler` |
 
 Die automatisch berechneten Werte koennen eingesehen werden:
@@ -66,9 +101,16 @@ Anwendung: <http://localhost:8000/>
 
 ## 4. Render-Free-CPU lokal simulieren
 
-In `.env`:
+Bevorzugt direkt erzeugen:
+
+```bash
+scripts/setup_local.sh --render-free-simulation
+```
+
+Oder in `.env.local` manuell setzen:
 
 ```env
+SIMULATE_RENDER_FREE=True
 WEB_CPUS=0.10
 WORKER_CPUS=0.50
 ```
@@ -76,7 +118,7 @@ WORKER_CPUS=0.50
 Danach:
 
 ```bash
-docker compose up -d --force-recreate web backtest-worker
+docker compose --env-file .env.local up -d --force-recreate web backtest-worker
 ```
 
 Der Worker besitzt weiterhin eigene Ressourcen; der Web-/Bot-Prozess wird künstlich auf 0,1 CPU begrenzt.

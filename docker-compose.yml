@@ -12,6 +12,8 @@ x-app-environment: &app-environment
   BACKTEST_LOCAL_FALLBACK_ENABLED: "True"
   AUTOSTART_BOTS: ${AUTOSTART_BOTS:-True}
   CELERY_WORKER_MAX_MEMORY_PER_CHILD: "384000"
+  BACKTEST_DEFAULT_PRICE_POINTS: ${BACKTEST_DEFAULT_PRICE_POINTS:-5000}
+  DATA_LOG_WRITE_INTERVAL_SECONDS: ${DATA_LOG_WRITE_INTERVAL_SECONDS:-5}
 
 # Gemeinsam genutzter Ordner fuer die vom `tuner`-Container generierte
 # Hardware-Optimierungsdatei. Wird von allen App-Containern gemountet.
@@ -38,6 +40,14 @@ services:
 
   postgres:
     image: postgres:17-alpine
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-384MB}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-tbot}
       POSTGRES_USER: ${POSTGRES_USER:-tbot}
@@ -49,7 +59,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-    mem_limit: 256m
+    mem_limit: ${POSTGRES_MEMORY:-512m}
     cpus: "${POSTGRES_CPUS:-0.50}"
     restart: unless-stopped
     depends_on:
@@ -65,12 +75,13 @@ services:
     volumes:
       - ./docker/redis-entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
       - tuning_runtime:/tbot-runtime:ro
+    command: redis-server --save "" --appendonly no --maxmemory ${REDIS_MAXMEMORY:-96mb} --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       timeout: 3s
       retries: 20
-    mem_limit: 64m
+    mem_limit: ${REDIS_MEMORY:-128m}
     cpus: "${REDIS_CPUS:-0.20}"
     restart: unless-stopped
     depends_on:
@@ -99,7 +110,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    mem_limit: 512m
+    mem_limit: ${WEB_MEMORY:-1024m}
     cpus: "${WEB_CPUS:-0.50}"
     restart: unless-stopped
 
@@ -129,7 +140,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-    mem_limit: 512m
+    mem_limit: ${WORKER_MEMORY:-768m}
     cpus: "${WORKER_CPUS:-0.50}"
     pids_limit: 64
     restart: unless-stopped
@@ -152,7 +163,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 192m
+    mem_limit: ${SCHEDULER_MEMORY:-192m}
     cpus: "${SCHEDULER_CPUS:-0.20}"
     restart: unless-stopped
 
