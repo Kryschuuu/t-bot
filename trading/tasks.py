@@ -1,4 +1,5 @@
 import logging
+import resource
 import threading
 import time
 import uuid
@@ -10,6 +11,7 @@ from celery import shared_task
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
+from kombu.exceptions import OperationalError as KombuOperationalError
 
 from .backtesting import Backtesting
 from .models import BacktestTask, Configuration, DataLog
@@ -32,44 +34,59 @@ def local_task_is_active(task_id):
         return task_id in _LOCAL_TASK_IDS
 
 
-def dispatch_task(task, *args, **kwargs):
-    """Dispatcht über Celery oder über einen lokalen Daemon-Thread ohne Broker."""
-    if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+def _dispatch_local(task, args, kwargs):
+    if not settings.BACKTEST_LOCAL_FALLBACK_ENABLED:
+        raise RuntimeError(
+            "Redis ist nicht erreichbar; separaten Celery-Worker konfigurieren "
+            "oder lokalen Fallback ausdrücklich aktivieren."
+        )
+    synthetic_id = f"eager-{uuid.uuid4()}"
+    with _LOCAL_TASK_IDS_LOCK:
+        _LOCAL_TASK_IDS.add(synthetic_id)
+
+    def run_in_thread():
+        close_old_connections()
+        try:
+            with _LOCAL_TASK_SEMAPHORE:
+                task.apply(
+                    args=args,
+                    kwargs=kwargs,
+                    task_id=synthetic_id,
+                    throw=True,
+                )
+        except Exception:
+            logger.exception(
+                "event=backtest.local_failed task=%s task_id=%s",
+                task.name,
+                synthetic_id,
+            )
+        finally:
+            close_old_connections()
+            with _LOCAL_TASK_IDS_LOCK:
+                _LOCAL_TASK_IDS.discard(synthetic_id)
+
+    threading.Thread(
+        target=run_in_thread,
+        daemon=True,
+        name=f"task-{task.name}-{synthetic_id[-8:]}",
+    ).start()
+    logger.info("event=backtest.local_dispatched task=%s task_id=%s", task.name, synthetic_id)
+    return _EagerAsyncResultStub(synthetic_id)
+
+
+def dispatch_task(task, *args, force_local=False, **kwargs):
+    """Celery first; local serial fallback only when explicitly enabled."""
+    if force_local or getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+        return _dispatch_local(task, args, kwargs)
+    try:
+        return task.apply_async(args=args, kwargs=kwargs, queue="backtest", priority=0)
+    except KombuOperationalError as exc:
         if not settings.BACKTEST_LOCAL_FALLBACK_ENABLED:
             raise RuntimeError(
-                "Lokale Backtests sind in Produktion deaktiviert. "
-                "REDIS_URL und separaten Celery-Worker konfigurieren."
-            )
-        synthetic_id = f"eager-{uuid.uuid4()}"
-        with _LOCAL_TASK_IDS_LOCK:
-            _LOCAL_TASK_IDS.add(synthetic_id)
-
-        def run_in_thread():
-            close_old_connections()
-            try:
-                # Free-Tier: nur ein lokaler Task gleichzeitig. Das begrenzt
-                # CPU, RAM und zusätzliche Django/Postgres-Verbindungen.
-                with _LOCAL_TASK_SEMAPHORE:
-                    task.apply(
-                        args=args,
-                        kwargs=kwargs,
-                        task_id=synthetic_id,
-                        throw=True,
-                    )
-            except Exception:
-                logger.exception("Hintergrund-Task %s ist fehlgeschlagen", task.name)
-            finally:
-                close_old_connections()
-                with _LOCAL_TASK_IDS_LOCK:
-                    _LOCAL_TASK_IDS.discard(synthetic_id)
-
-        threading.Thread(
-            target=run_in_thread,
-            daemon=True,
-            name=f"task-{task.name}-{synthetic_id[-8:]}",
-        ).start()
-        return _EagerAsyncResultStub(synthetic_id)
-    return task.delay(*args, **kwargs)
+                "Redis/Backtest-Worker ist nicht erreichbar. Task wurde nicht gestartet."
+            ) from exc
+        logger.warning("event=backtest.redis_unavailable fallback=local error=%s", exc)
+        return _dispatch_local(task, args, kwargs)
 
 
 def decimal_to_str(value):
@@ -249,6 +266,7 @@ def collect_results(results, task_id):
 def run_backtest(self, config_id, params, symbols, task_id):
     """Führt einen Backtest speicherschonend und mit kooperativer Pause aus."""
     started_at = timezone.now()
+    started_perf = time.perf_counter()
     try:
         task = BacktestTask.objects.select_related("configuration").get(id=task_id)
         config = task.configuration
@@ -275,6 +293,14 @@ def run_backtest(self, config_id, params, symbols, task_id):
                 f"Ungültige Anzahl Kombinationen ({total}); maximal {_MAX_TOTAL_COMBINATIONS}."
             )
 
+        logger.info(
+            "event=backtest.started task_id=%s celery_id=%s config_id=%s symbols=%s combinations=%s",
+            task_id,
+            self.request.id,
+            config_id,
+            len(symbols),
+            total,
+        )
         prices_by_symbol = {
             symbol: _historical_prices(
                 config_id,
@@ -288,6 +314,7 @@ def run_backtest(self, config_id, params, symbols, task_id):
         completed = 0
         last_progress = -1
         combinations_per_symbol = len(ranges[0]) * len(ranges[1]) * len(ranges[2])
+        control_check_interval = max(10, total // 100)
         for symbol in symbols:
             prices = prices_by_symbol[symbol]
             if len(prices) < 3:
@@ -300,7 +327,7 @@ def run_backtest(self, config_id, params, symbols, task_id):
             for acc_threshold in ranges[0]:
                 for nda_threshold in ranges[1]:
                     for deltadelta_threshold in ranges[2]:
-                        if completed % 10 == 0:
+                        if completed % control_check_interval == 0:
                             while True:
                                 state = BacktestTask.objects.only("status").get(id=task_id).status
                                 if state == "paused":
@@ -333,14 +360,27 @@ def run_backtest(self, config_id, params, symbols, task_id):
 
         task.refresh_from_db(fields=["status"])
         if task.status == "cancelled":
+            logger.info("event=backtest.cancelled task_id=%s completed=%s", task_id, completed)
             return {"status": "cancelled"}
         result = _collect_results([*best_results.values(), *errors], task)
         ended_at = timezone.now()
+        duration_seconds = time.perf_counter() - started_perf
+        peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         result.update(
             {
                 "start_time": started_at.isoformat(),
                 "end_time": ended_at.isoformat(),
                 "duration": str(ended_at - started_at),
+                "metrics": {
+                    "duration_seconds": round(duration_seconds, 3),
+                    "peak_rss_mb": round(peak_rss_mb, 2),
+                    "combinations": total,
+                    "symbols": len(symbols),
+                    "price_points_total": sum(len(values) for values in prices_by_symbol.values()),
+                    "price_points_max": max(
+                        (len(values) for values in prices_by_symbol.values()), default=0
+                    ),
+                },
             }
         )
         task.result = result
@@ -348,12 +388,24 @@ def run_backtest(self, config_id, params, symbols, task_id):
         task.progress = 100
         task.save()
         task.update_progress(100)
+        logger.info(
+            "event=backtest.completed task_id=%s duration=%.3f peak_rss_mb=%.2f combinations=%s",
+            task_id,
+            duration_seconds,
+            peak_rss_mb,
+            total,
+        )
         return result
     except BacktestTask.DoesNotExist:
-        logger.error("Backtest %s existiert nicht", task_id)
+        logger.error("event=backtest.missing task_id=%s", task_id)
         return {"error": "Backtest nicht gefunden"}
     except Exception as exc:
-        logger.exception("Backtest %s fehlgeschlagen", task_id)
+        logger.exception(
+            "event=backtest.failed task_id=%s duration=%.3f error_type=%s",
+            task_id,
+            time.perf_counter() - started_perf,
+            type(exc).__name__,
+        )
         BacktestTask.objects.filter(id=task_id).update(
             status="failed",
             result={"error": str(exc)},

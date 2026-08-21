@@ -1,0 +1,114 @@
+name: t-bot-local
+
+x-app-environment: &app-environment
+  DEBUG: "True"
+  RENDER: "False"
+  SECRET_KEY: ${SECRET_KEY:-django-insecure-local-compose-only}
+  PASSPHRASE: ${PASSPHRASE:-local-t-bot}
+  PASSPHRASE_GATE_ENABLED: ${PASSPHRASE_GATE_ENABLED:-True}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-tbot}:${POSTGRES_PASSWORD:-tbot-local-password}@postgres:5432/${POSTGRES_DB:-tbot}
+  DATABASE_SSL_REQUIRE: "False"
+  REDIS_URL: redis://redis:6379/0
+  BACKTEST_LOCAL_FALLBACK_ENABLED: "True"
+  AUTOSTART_BOTS: ${AUTOSTART_BOTS:-True}
+  CELERY_WORKER_MAX_MEMORY_PER_CHILD: "384000"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tbot}
+      POSTGRES_USER: ${POSTGRES_USER:-tbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tbot-local-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tbot} -d ${POSTGRES_DB:-tbot}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    cpus: "${POSTGRES_CPUS:-0.50}"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --save "" --appendonly no --maxmemory 48mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    mem_limit: 64m
+    cpus: "${REDIS_CPUS:-0.20}"
+    restart: unless-stopped
+
+  web:
+    build: .
+    init: true
+    environment:
+      <<: *app-environment
+      PORT: "8000"
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    cpus: "${WEB_CPUS:-0.50}"
+    restart: unless-stopped
+
+  backtest-worker:
+    build: .
+    init: true
+    command: /app/docker/worker-entrypoint.sh
+    environment:
+      <<: *app-environment
+      AUTOSTART_BOTS: "False"
+      CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A trading_bot_project inspect ping -d celery@$$HOSTNAME --timeout 3 | grep -q pong",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 512m
+    cpus: "${WORKER_CPUS:-0.50}"
+    pids_limit: 64
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    init: true
+    profiles: ["scheduler"]
+    command: /app/docker/beat-entrypoint.sh
+    environment:
+      <<: *app-environment
+      AUTOSTART_BOTS: "False"
+      CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 192m
+    cpus: "${SCHEDULER_CPUS:-0.20}"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

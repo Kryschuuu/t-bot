@@ -2,6 +2,20 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.2.0] – 2026-08-21
+
+### Produktionsreifes lokales Backtesting-Setup
+
+- `docker-compose.yml` mit getrennten Services für Daphne/Web/Bot, Celery-Backtest-Worker, Redis und PostgreSQL; optionaler Beat-Scheduler über Compose-Profil.
+- `.env.docker.example`, lokale Resource-Limits und optional `WEB_CPUS=0.10` zur Render-Free-Simulation.
+- Zentrale `celery_config.py`: Queue `backtest`, Concurrency 1, Prefetch 1, Child-Recycling, 384-MB-Limit, Soft-/Hard-Limits, Late ACK und Worker-Lost-Requeue.
+- Redis-Prioritäten: zukünftige Bot-/Default-Tasks Priorität 9, Backtests Priorität 0.
+- Worker-Status mit Redis-/Ping-Prüfung, Fünf-Sekunden-Cache und sicherem lokalen Fallback.
+- Authentifizierter `/api/backtesting/status/`-Endpoint mit Workerstatus sowie Web-Heartbeat, Peak-RSS, Threadzahl und Scheduler-Lag.
+- Backtest-Resultate enthalten Dauer, Peak-RSS, Kombinationen und Preispunktmetriken; strukturierte `event=backtest.*`-Logs.
+- Kooperative Pause/Cancel-DB-Prüfung auf ungefähr 100 Checks pro Task gedrosselt.
+- `LOCAL_DEVELOPMENT.md`, Worker-/Beat-Entrypoints und vollständige Start-, Ausfall- und Verifikationsanleitung.
+
 ## [2.1.0] – 2026-08-21
 
 ### Lokale Analyse, modernes UI und isolierte Backtesting-Architektur

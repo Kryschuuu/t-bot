@@ -1,6 +1,6 @@
 # Backtesting – Machbarkeitsstudie und Produktionsarchitektur
 
-**Stand:** 21. August 2026 · **Version:** 2.1.0
+**Stand:** 21. August 2026 · **Version:** 2.2.0
 
 ## Executive Summary
 

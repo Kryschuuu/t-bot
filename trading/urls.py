@@ -47,6 +47,11 @@ urlpatterns = [
     ),
     path("backtesting/", views.backtesting_index, name="backtesting_index"),
     path(
+        "api/backtesting/status/",
+        views.backtesting_status_api,
+        name="backtesting_status_api",
+    ),
+    path(
         "backtesting/<int:config_id>/",
         views.backtesting_form,
         name="backtesting_form",

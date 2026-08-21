@@ -22,7 +22,7 @@ RUN groupadd --system app && useradd --system --gid app --home /app app
 COPY --chown=app:app . .
 # WORKDIR legt /app als root an. Der unprivilegierte Runtime-Benutzer muss
 # STATIC_ROOT (und ggf. lokale Cache-Verzeichnisse) darin anlegen dürfen.
-RUN chmod +x /app/docker-entrypoint.sh && chown app:app /app
+RUN chmod +x /app/docker-entrypoint.sh /app/docker/*.sh && chown app:app /app
 USER app
 
 RUN SECRET_KEY=build-only-secret-key \

@@ -296,6 +296,19 @@ class ViewSecurityTests(TestCase):
         self.assertEqual(response.status_code, 405)
         self.assertEqual(self.client.get(reverse("logout")).status_code, 405)
 
+    @override_settings(
+        CELERY_TASK_ALWAYS_EAGER=True,
+        BACKTEST_LOCAL_FALLBACK_ENABLED=True,
+    )
+    def test_backtesting_status_reports_local_fallback_and_runtime_heartbeat(self):
+        response = self.client.get(reverse("backtesting_status_api"), {"refresh": "1"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["backtesting"]["mode"], "local-fallback")
+        self.assertTrue(payload["backtesting"]["available"])
+        self.assertIn("peak_rss_mb", payload["web_runtime"])
+        self.assertTrue(payload["web_runtime"]["responsive"])
+
     def test_backtest_control_is_owner_scoped(self):
         foreign_config = Configuration.objects.create(
             user=self.other,
@@ -574,7 +587,10 @@ class BacktestTaskTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "separaten Celery-Worker"):
             dispatch_task(run_backtest, self.config.id, {}, ["BTC/USDT"], 1)
 
-    @override_settings(BACKTEST_EXECUTION_AVAILABLE=False)
+    @override_settings(
+        CELERY_TASK_ALWAYS_EAGER=True,
+        BACKTEST_LOCAL_FALLBACK_ENABLED=False,
+    )
     def test_backtesting_page_degrades_without_worker(self):
         response = self.client.post(
             reverse("backtesting_form", args=[self.config.id]),
@@ -621,3 +637,5 @@ class BacktestTaskTests(TestCase):
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.progress, 100)
         self.assertIn("BTC/USDT", task.result["symbol_results"])
+        self.assertEqual(task.result["metrics"]["combinations"], 1)
+        self.assertGreater(task.result["metrics"]["peak_rss_mb"], 0)

@@ -6,8 +6,9 @@
     <a href="{% url 'dashboard' %}?config_id={{ config.id }}" class="btn btn-outline-secondary">Zum Dashboard</a>
 </div>
 
-<div class="alert {% if execution_available %}alert-success{% else %}alert-warning{% endif %}">
-  <strong>Ausführung:</strong> {% if execution_available %}{{ execution_mode }} ist verfügbar.{% else %}Auf Render Free deaktiviert. Trading-Bot und Marktstreams haben Vorrang; für Backtests REDIS_URL und einen separaten Celery-Worker einrichten.{% endif %}
+<div id="worker-status" class="alert {% if execution_available %}alert-success{% else %}alert-warning{% endif %}">
+  <strong>Ausführung:</strong> <span id="worker-mode">{{ execution_mode }}</span> · Redis: <span id="redis-state">{% if runtime_status.redis %}online{% else %}offline{% endif %}</span> · Worker: <span id="worker-state">{% if runtime_status.worker %}online{% else %}offline{% endif %}</span>.
+  {% if runtime_status.degraded %}<span class="d-block mt-1">Graceful Degradation aktiv: {% if execution_available %}serieller lokaler Fallback{% else %}Start gesperrt; Trading-Bot hat Vorrang{% endif %}.</span>{% endif %}
 </div>
 
 <div class="accordion mb-4" id="backtestHelp"><div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#backtestHelpBody">Wie funktioniert dieses Backtesting?</button></h2><div id="backtestHelpBody" class="accordion-collapse collapse" data-bs-parent="#backtestHelp"><div class="accordion-body">
@@ -131,6 +132,21 @@
     }
     document.querySelectorAll("input[type=number]").forEach(input => input.addEventListener("input", updateEstimate));
     updateEstimate();
+    async function refreshWorkerStatus() {
+        try {
+            const response = await fetch("{% url 'backtesting_status_api' %}");
+            if (!response.ok) return;
+            const payload = await response.json();
+            const status = payload.backtesting;
+            document.getElementById("worker-mode").textContent = status.mode;
+            document.getElementById("redis-state").textContent = status.redis ? "online" : "offline";
+            document.getElementById("worker-state").textContent = status.worker ? "online" : "offline";
+            const box = document.getElementById("worker-status");
+            box.className = `alert ${status.available ? "alert-success" : "alert-warning"}`;
+            box.title = `Web Peak-RSS ${payload.web_runtime.peak_rss_mb} MB; Scheduler-Lag ${payload.web_runtime.max_scheduler_lag_ms} ms`;
+        } catch (_) { /* Statusanzeige ist nicht taskkritisch. */ }
+    }
+    setInterval(refreshWorkerStatus, 10000);
     {% for task in tasks_running %}
     (() => {
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";

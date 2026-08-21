@@ -36,9 +36,11 @@ from .forms import (
 )
 from .market_data import MarketDataError, SymbolValidationError, validate_exchange_symbols
 from .models import BacktestTask, Configuration, DataLog, ErrorLog
+from .monitoring import runtime_heartbeat
 from .symbols import get_available_symbols
 from .tasks import dispatch_task, local_task_is_active, run_backtest
 from .trading_bot import bot_manager
+from .worker_status import get_backtest_runtime_status
 
 logger = logging.getLogger(__name__)
 _PLOT_LOCK = threading.Lock()
@@ -1041,6 +1043,17 @@ def _combination_count(params, symbol_count):
 
 @login_required
 @require_GET
+def backtesting_status_api(request):
+    return JsonResponse(
+        {
+            "backtesting": get_backtest_runtime_status(force=request.GET.get("refresh") == "1"),
+            "web_runtime": runtime_heartbeat.snapshot(),
+        }
+    )
+
+
+@login_required
+@require_GET
 def backtesting_index(request):
     configs = Configuration.objects.filter(user=request.user).order_by("-id")
     cards = []
@@ -1054,7 +1067,11 @@ def backtesting_index(request):
                 "last_task": tasks.order_by("-created_at").first(),
             }
         )
-    return render(request, "trading/backtesting_index.html", {"cards": cards})
+    return render(
+        request,
+        "trading/backtesting_index.html",
+        {"cards": cards, "runtime_status": get_backtest_runtime_status()},
+    )
 
 
 @login_required
@@ -1081,8 +1098,9 @@ def backtesting_form(request, config_id):
         initial=initial,
         start_capital=config.start_capital,
     )
+    runtime_status = get_backtest_runtime_status(force=request.method == "POST")
     if request.method == "POST" and form.is_valid():
-        if not settings.BACKTEST_EXECUTION_AVAILABLE:
+        if not runtime_status["available"]:
             form.add_error(
                 None,
                 "Backtesting ist auf Render Free zum Schutz des Trading-Bots deaktiviert. "
@@ -1118,6 +1136,7 @@ def backtesting_form(request, config_id):
                         params,
                         symbols,
                         backtest_task.id,
+                        force_local=runtime_status["mode"] == "local-fallback",
                     )
                     BacktestTask.objects.filter(id=backtest_task.id).update(
                         celery_task_id=celery_task.id
@@ -1159,11 +1178,10 @@ def backtesting_form(request, config_id):
             "tasks_running": tasks_running,
             "tasks_scheduled": tasks_scheduled,
             "backtests": tasks_completed,
-            "execution_available": settings.BACKTEST_EXECUTION_AVAILABLE,
+            "execution_available": runtime_status["available"],
+            "runtime_status": runtime_status,
             "symbol_count": len(_symbols(config)),
-            "execution_mode": (
-                "Celery-Worker" if settings.REDIS_URL else "Lokaler Entwicklungsmodus"
-            ),
+            "execution_mode": runtime_status["mode"],
         },
     )
 

@@ -1,6 +1,6 @@
 # t-bot – Benutzer- und Indikatorhandbuch
 
-**Version 2.1.0 · Stand 21. August 2026**
+**Version 2.2.0 · Stand 21. August 2026**
 
 [TOC]
 
@@ -261,7 +261,7 @@ Backtests sind keine Prognose. Overfitting entsteht, wenn Parameter zu eng an ei
 
 Auf Render Free ist die Backtest-Ausführung absichtlich deaktiviert: 0,1 CPU und 512 MB werden vom Web-/Bot-Prozess benötigt, und Free unterstützt keinen isolierten Background Worker. Ein lokaler Thread könnte die absolute Bot-Priorität nicht garantieren. Lokal kann der serielle Entwicklungsfallback aktiviert werden.
 
-Produktiv benötigt Backtesting `REDIS_URL` und einen separaten Celery-Worker auf Queue `backtest` mit Concurrency 1, Prefetch 1, maximal einem Task pro Child und 384-MB-Child-Limit. Details, Architekturdiagramm, Messergebnisse und Deployment stehen in `BACKTESTING_STUDY.md`; `render.worker.example.yaml` ist die absichtlich nicht automatisch aktivierte Vorlage.
+Produktiv benötigt Backtesting `REDIS_URL` und einen separaten Celery-Worker auf Queue `backtest` mit Concurrency 1, Prefetch 1, maximal einem Task pro Child und 384-MB-Child-Limit. Lokal startet `docker compose up --build -d` Web/Bot, Worker, Redis und PostgreSQL in getrennten Containern; fällt Worker oder Redis aus, ist der serielle lokale Fallback explizit erlaubt. Details zum Setup stehen in `LOCAL_DEVELOPMENT.md`; Architekturdiagramm und Messergebnisse in `BACKTESTING_STUDY.md`; `render.worker.example.yaml` ist die absichtlich nicht automatisch aktivierte Produktionsvorlage.
 
 ## 12. Fehler-Log und Betrieb
 

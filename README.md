@@ -4,9 +4,18 @@ Django-/Channels-Anwendung für **Paper Trading**, Marktvisualisierung und param
 
 Binance-Kurse laufen über einen persistenten kombinierten WebSocket-Stream (kein REST-Polling/Request-Weight). BitMart Spot nutzt die aktuelle V3-Public-API; Bitunix Spot/Futures ist über öffentliche, defensiv gedrosselte Adapter integriert. Beim Speichern und Aktivieren werden alle Symbole live geprüft. Das Dashboard bietet paginierte Logs, PDF/HTML/CSV-Reports und einen doppelt bestätigten Kill-Switch.
 
-Ausführliche Bedienung, Indikatorformeln und Betriebsanweisungen stehen in [`MANUAL.md`](MANUAL.md) und werden in der App unter `/help/` angezeigt. Die Backtesting-Machbarkeitsstudie mit Architekturdiagramm und Lastmessung steht in [`BACKTESTING_STUDY.md`](BACKTESTING_STUDY.md); [`render.worker.example.yaml`](render.worker.example.yaml) ist die optionale Worker-Vorlage. Versionshistorie: [`CHANGELOG.md`](CHANGELOG.md). Aktuelle Version: [`VERSION`](VERSION).
+Ausführliche Bedienung, Indikatorformeln und Betriebsanweisungen stehen in [`MANUAL.md`](MANUAL.md) und werden in der App unter `/help/` angezeigt. Die lokale Docker-Umgebung ist in [`LOCAL_DEVELOPMENT.md`](LOCAL_DEVELOPMENT.md) dokumentiert. Die Backtesting-Machbarkeitsstudie mit Architekturdiagramm und Lastmessung steht in [`BACKTESTING_STUDY.md`](BACKTESTING_STUDY.md); [`render.worker.example.yaml`](render.worker.example.yaml) ist die optionale Worker-Vorlage. Versionshistorie: [`CHANGELOG.md`](CHANGELOG.md). Aktuelle Version: [`VERSION`](VERSION).
 
-## Lokal starten
+## Docker Compose (empfohlen)
+
+```bash
+cp .env.docker.example .env
+docker compose up --build -d
+```
+
+Danach: <http://localhost:8000/>. Web, Worker, Redis und PostgreSQL laufen als getrennte, ressourcenbegrenzte Services.
+
+## Lokal ohne Docker starten
 
 Voraussetzungen: Python 3.12 und die nativen WeasyPrint-Bibliotheken (unter Debian insbesondere Pango/Harfbuzz).
 

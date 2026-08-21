@@ -29,6 +29,9 @@ class TradingConfig(AppConfig):
     def ready(self):
         from django.conf import settings
 
+        from .monitoring import runtime_heartbeat
+
+        runtime_heartbeat.start()
         if not getattr(settings, "AUTOSTART_BOTS", True):
             return
         command = sys.argv[1] if len(sys.argv) > 1 else ""

@@ -18,6 +18,10 @@ services:
         value: "True"
       - key: AUTOSTART_BOTS
         value: "False"
+      - key: BACKTEST_LOCAL_FALLBACK_ENABLED
+        value: "False"
+      - key: CELERY_WORKER_MAX_MEMORY_PER_CHILD
+        value: "384000"
       - key: REDIS_URL
         sync: false
       - key: DATABASE_URL
@@ -41,6 +45,8 @@ services:
       - key: RENDER
         value: "True"
       - key: AUTOSTART_BOTS
+        value: "False"
+      - key: BACKTEST_LOCAL_FALLBACK_ENABLED
         value: "False"
       - key: REDIS_URL
         sync: false
