@@ -20,15 +20,32 @@ Mindestens `SECRET_KEY`, `PASSPHRASE` und `POSTGRES_PASSWORD` in `.env` ändern.
 docker compose up --build -d
 ```
 
+Beim Build laeuft `install.sh` im Container-Modus und installiert die zur
+Basis-Image-Distribution passenden Laufzeit-Pakete. Vor Redis, PostgreSQL
+und der App fuehrt der One-Shot-`tuner`-Service `hardware-test.sh` aus und
+schreibt eine automatisch an die Host-Ressourcen angepasste `tuning.env` in
+ein gemeinsam genutztes Volume. Redis startet daraufhin mit berechneten
+Werten fuer `maxmemory`, `maxmemory-policy` und `io-threads`; Web, Worker
+und Beat uebernehmen die empfohlenen Werte fuer Worker-Threads,
+Connection-Pools und Speicher-Limits.
+
 Services:
 
 | Service | Aufgabe | Grenze |
 |---|---|---|
-| `web` | Django, Daphne, WebSockets, TradingBot | 512 MB, standardmäßig 0,5 CPU |
+| `tuner` | One-Shot: Hardware-Analyse und Tuning-Datei generieren | kurzlebig |
+| `web` | Django, Daphne, WebSockets, TradingBot | 512 MB, standardmaeßig 0,5 CPU |
 | `backtest-worker` | ausschließlich Queue `backtest` | 512-MB-Container, 384-MB-Celery-Child, Concurrency 1 |
-| `redis` | Broker/Result Backend | 64 MB, keine Persistenz für lokale Entwicklung |
+| `redis` | Broker/Result Backend | 64 MB, keine Persistenz fuer lokale Entwicklung |
 | `postgres` | lokale persistente DB | 256 MB |
 | `scheduler` | optional Celery Beat | nur Profil `scheduler` |
+
+Die automatisch berechneten Werte koennen eingesehen werden:
+
+```bash
+docker compose cp tuner:/tbot-runtime/hardware-report.txt - | less
+docker compose exec web sh -c 'cat /tbot-runtime/tuning.env'
+```
 
 Status prüfen:
 

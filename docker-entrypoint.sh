@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Automatisch generierte Hardware-Tuning-Werte laden (sofern verfuegbar).
+# shellcheck source=docker/load-tuning.sh
+. /app/docker/load-tuning.sh
+
 # Migrationen verwenden immer die direkte PostgreSQL-Verbindung. Die App nutzt
 # DATABASE_POOL_URL nur, wenn auf einem bezahlten Datastore PgBouncer aktiviert ist.
 USE_DIRECT_DATABASE_URL=True python manage.py wait_for_database

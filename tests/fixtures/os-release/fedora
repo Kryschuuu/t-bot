@@ -1,0 +1,10 @@
+NAME="Fedora Linux"
+VERSION="40 (Workstation Edition)"
+ID=fedora
+VERSION_ID=40
+VERSION_CODENAME=""
+PLATFORM_ID="platform:f40"
+PRETTY_NAME="Fedora Linux 40 (Workstation Edition)"
+REDHAT_BUGZILLA_PRODUCT="Fedora"
+REDHAT_SUPPORT_PRODUCT="Fedora"
+REDHAT_SUPPORT_PRODUCT_VERSION="40"

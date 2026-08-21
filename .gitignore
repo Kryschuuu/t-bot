@@ -20,6 +20,10 @@ media/
 !.env.example
 !.env.docker.example
 
+# Generierte lokale Konfiguration (install.sh / hardware-test.sh)
+config/
+!config.template
+
 # Editors / OS
 .idea/
 .vscode/

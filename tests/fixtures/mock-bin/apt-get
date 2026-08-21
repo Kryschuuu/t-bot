@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock apt-get: logged alle Aufrufe in eine Datei, die Tests auswerten koennen.
+LOG="${MOCK_PM_LOG:-/tmp/tbot-mock-pm.log}"
+echo "apt-get $*" >>"${LOG}"
+exit 0
