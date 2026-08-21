@@ -16,9 +16,61 @@ scripts/setup_local.sh
 scripts/setup_local.sh --install-deps
 ```
 
+Beim `--build` laeuft automatisch `install.sh` (Container-Modus), das die
+zur Basis-Distribution passenden Laufzeit-Pakete installiert. Vor dem Start
+von Redis, PostgreSQL und der App fuehrt der One-Shot-`tuner`-Service
+`hardware-test.sh` aus und schreibt eine optimierte `tuning.env` in ein
+gemeinsam genutztes Volume. Redis startet daraufhin mit automatisch
+berechneten Werten fuer `maxmemory`, `maxmemory-policy` und `io-threads`;
+Web/Worker/Beat uebernehmen die empfohlenen Werte fuer Worker-Threads,
+Connection-Pools und Speicher-Limits. Danach ist die App unter
+<http://localhost:8000/> erreichbar. Web, Worker, Redis und PostgreSQL
+laufen als getrennte, ressourcenbegrenzte Services.
 Danach: <http://localhost:8000/>. Web, Worker, Redis und PostgreSQL laufen als getrennte, automatisch dimensionierte Services. Render-Free-Simulation ist standardmäßig deaktiviert.
 
 ## Lokal ohne Docker starten
+
+Das universelle Installationsskript erkennt die Linux-Distribution
+(Debian/Ubuntu via apt, Arch via pacman, RHEL/CentOS/Fedora via dnf/yum),
+installiert alle Systemabhaengigkeiten, richtet Redis als lokalen Service
+ein und erzeugt eine lokale Konfigurationsdatei:
+
+```bash
+./install.sh                # automatische Erkennung Host/Container
+# oder explizit:
+./install.sh --mode=host --profile=full --yes
+```
+
+Anschliessend die erzeugte Konfiguration laden und die App starten:
+
+```bash
+set -a; . ./config/local.env; set +a
+python manage.py migrate
+python manage.py collectstatic --noinput
+python manage.py runserver
+```
+
+### Hardware-Optimierung
+
+`hardware-test.sh` vermisst CPU, RAM und Disk-I/O und berechnet eine
+empfohlene Konfiguration fuer Redis und den t-bot:
+
+```bash
+./hardware-test.sh                       # schreibt config/hardware.env + Bericht
+./hardware-test.sh --format=json         # zusaetzlich maschinenlesbar
+./hardware-test.sh --skip-disk-test      # schneller, ohne I/O-Benchmark
+```
+
+### Render.com-Simulation
+
+Die Render.com-Simulation ist in der erzeugten `config/local.env`
+standardmaessig **deaktiviert** (`RENDER_SIMULATION=False`), damit das
+lokale Setup unbeeinflusst bleibt. Zum Aktivieren den Wert auf `True`
+setzen und die Ressourcen-Limits (`*_CPUS`, ...) anpassen. Bei der
+Installation kann sie direkt mit `./install.sh --render-simulation`
+aktiviert werden.
+
+### Manuelle Installation (alt)
 
 Voraussetzungen: Python 3.12 und die nativen WeasyPrint-Bibliotheken (unter Debian insbesondere Pango/Harfbuzz).
 
@@ -39,6 +91,14 @@ Django lädt `.env` nicht automatisch. Die Variablen müssen von der Shell, eine
 ## Qualitätssicherung
 
 ```bash
+# Shell-Skripte linten und Test-Suite ausfuehren
+shellcheck install.sh hardware-test.sh docker-entrypoint.sh docker/*.sh tests/*.sh
+./tests/run_tests.sh
+
+# Distro-Smoke-Tests (benoetigt Docker, prueft apt/pacman/dnf)
+./tests/distro_smoke_test.sh
+
+# Django- / Python-Tests
 python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test

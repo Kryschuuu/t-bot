@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+arg="${1:-}"
+case "${arg}" in
+  -m) echo "${MOCK_UNAME_M:-x86_64}" ;;
+  -n) echo "${MOCK_UNAME_N:-testhost}" ;;
+  -s) echo "Linux" ;;
+  *)  echo "Linux" ;;
+esac
