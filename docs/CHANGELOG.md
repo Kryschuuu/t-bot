@@ -2,6 +2,25 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.3.1] – 2026-08-22
+
+### Indikator-Konsistenz, Tooltip-System und Behebung des /help/ 500-Fehlers
+
+- **Fehlerbehebung `/help/` (500 Server Error):** `_render_manual` prüft nun robust Pfade (`docs/MANUAL.md` und `MANUAL.md`) mit Fallback. Das gerenderte HTML wird mittels `@lru_cache(maxsize=1)` im Speicher gehalten, sodass keine wiederkehrende CPU- oder I/O-Last entsteht.
+- **Indikatoren-Mapping & einheitliche Benennung:**
+  - `div_DVA_prev_NDA_threshold_buy` ist in Konfiguration und Dashboard jetzt präzise als **„Beschleunigung (DVA / prev NDA) – Kaufschwelle“** benannt und referenziert direkt die Parameter `Beschleunigung – von / bis / Schritt` (`acc_from`, `acc_to`, `acc_steps`) im Backtesting-Modul.
+  - `deltadelta_threshold_buy` ist einheitlich als **„DeltaDelta (geglättetes Momentum) – Kaufschwelle“** benannt (Backtesting: `deltadelta_from`, `deltadelta_to`, `deltadelta_steps`).
+  - `nda_threshold_buy` ist einheitlich als **„NDA (normalisierte Preisänderung) – Kaufschwelle“** benannt (Backtesting: `nda_from`, `nda_to`, `nda_steps`).
+- **Interaktive Info- und Hover-Elemente:**
+  - Jedes bearbeitbare Eingabefeld in Konfigurationsformularen, Dashboard, Backtesting, Login, Registrierung, Passphrase-Gate und Analyse verfügt über ein interaktives `ⓘ`-Symbol mit Bootstrap 5-Tooltip sowie `title`-Attributen.
+  - Formular-Hilfetexte (`form-text`) und Feldlabels wurden umfassend überarbeitet und präzisiert.
+- **Handbuch-Aktualisierung (`MANUAL.md`):**
+  - Vollständige Zuordnungsmatrix zwischen Datenbankfeldern, Live-Formularen und Backtesting-Suchräumen.
+  - Detaillierte mathematische Formeln und Bedeutungen für NDA, DVA, Beschleunigung, DeltaDelta und MVD.
+- **Diagramm- und Ergebnis-Labels:**
+  - Plotly-Chart-Traces und Backtesting-Ergebnis-Strings zeigen jetzt lesbare, aussagekräftige Indikatornamen an.
+- **Testabdeckung:** Unit- und Integrationstests für Handbuch-Rendering, Formular-Labels, Help-Texte, Indikatoren und Backtest-Zuordnung erweitert.
+
 ## [2.3.0] – 2026-08-22
 
 ### Universelles Build-/Install-Skript und automatische Hardware-Optimierung
