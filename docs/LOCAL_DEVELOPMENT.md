@@ -62,18 +62,22 @@ Mindestens `SECRET_KEY`, `PASSPHRASE` und `POSTGRES_PASSWORD` ändern. `.env.loc
 
 Services:
 
-| Service | Aufgabe | Grenze |
+| Service | Aufgabe | Grenze (Default, per `.env.local` + Tuner anpassbar) |
 |---|---|---|
-| `tuner` | One-Shot: Hardware-Analyse und Tuning-Datei generieren | kurzlebig |
-| `web` | Django, Daphne, WebSockets, TradingBot | 512 MB, standardmaeßig 0,5 CPU |
-| `backtest-worker` | ausschließlich Queue `backtest` | 512-MB-Container, 384-MB-Celery-Child, Concurrency 1 |
-| `redis` | Broker/Result Backend | 64 MB, keine Persistenz fuer lokale Entwicklung |
-| `postgres` | lokale persistente DB | 256 MB |
-| `web` | Django, Daphne, WebSockets, TradingBot | hardwareabhängige CPU/RAM-Cgroup |
-| `backtest-worker` | ausschließlich Queue `backtest` | eigene Cgroup, 384-MB-Celery-Child, Concurrency 1 |
-| `redis` | Broker/Result Backend | hardwareabhängiges Maxmemory, keine lokale Persistenz |
-| `postgres` | lokale persistente DB | max. 40 Verbindungen, abgestimmte Cachewerte |
-| `scheduler` | optional Celery Beat | nur Profil `scheduler` |
+| `tuner` | One-Shot: Hardware-Analyse und Tuning-Datei generieren | kurzlebig, schreibt `/tbot-runtime/tuning.env` + `hardware-report.txt` |
+| `web` | Django, Daphne, WebSockets, TradingBot | eigene CPU/RAM-Cgroup, Default 0,5 CPU / 1024 MB |
+| `backtest-worker` | ausschließlich Queue `backtest` | eigene Cgroup (Default 0,5 CPU / 768 MB), 384-MB-Celery-Child, Concurrency 1 |
+| `redis` | Broker/Result Backend | hardwareabhängiges Maxmemory (Default 96 MB), keine lokale Persistenz, POSIX-Entrypoint (Alpine-kompatibel) |
+| `postgres` | lokale persistente DB | max. 40 Verbindungen, abgestimmte Cachewerte (`shared_buffers`/`effective_cache_size`), Default 0,5 CPU / 512 MB |
+| `scheduler` | optional Celery Beat | nur Profil `scheduler`, Default 0,2 CPU / 192 MB |
+
+> Zwei Tuning-Pfade, ein Ergebnis: Beim `docker compose up --build` misst der
+> Compose-`tuner`-Service die Hardware per `hardware-test.sh` (Shell) und legt
+> `tuning.env` ins `tuning_runtime`-Volume. Alternativ erzeugt
+> `scripts/setup_local.sh` vorab eine optimierte `.env.local` per
+> `scripts/tune_local_hardware.py` (Python). Beide Pfade schreiben dieselben
+> Schlüssel (`*_CPUS`, `*_MEMORY`, `REDIS_MAXMEMORY`, `POSTGRES_*`); explizit
+> in `.env.local` gesetzte Werte haben Vorrang.
 
 Die automatisch berechneten Werte koennen eingesehen werden:
 

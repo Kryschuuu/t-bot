@@ -1,5 +1,7 @@
 # Peer Review – Lokales Setup v2.3.0
 
+> Scope-Version 2.3.0 · Gültigkeit bestätigt für 2.3.2 am 8. September 2026 (inhaltlich unverändert).
+
 ## Scope
 
 Review von Installer, Hardware-Tuner, Docker Compose, Celery-Isolation, Redis-/Worker-Fallback, Secrets, Monitoring und Testbarkeit.
