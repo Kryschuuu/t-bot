@@ -4,6 +4,9 @@
 **Autor:** Backend-Engineering (Cross-Platform-Deployment)
 **Scope:** `install.sh`, `hardware-test.sh`, `config.template`, `docker/`,
 `tests/`, `docker-compose.yml`, `Dockerfile`
+**Review-Version:** v2.3.0 (PR #1) · **Re-validiert für 2.3.2** am 2026-09-08:
+`docker/redis-entrypoint.sh` ist nun POSIX-sh (Alpine/BusyBox-kompatibel),
+Test-Suite weiterhin 6/6 grün, `dd`-Benchmark-Angabe korrigiert (64 MB).
 
 ---
 
@@ -28,7 +31,7 @@
 |---|---|---|
 | CPU-Erkennung | ✅ | `nproc`, `/proc/cpuinfo` (Modell, MHz), `uname -m`. |
 | RAM-Messung | ✅ | `/proc/meminfo` (`MemTotal`, `MemAvailable`) mit Fallback auf `free`. |
-| Disk-I/O-Test | ✅ | 256 MB `dd if=/dev/zero ... conv=fdatasync` (Schreiben), anschliessender Lesetest. Ueberspringbar mit `--skip-disk-test`. |
+| Disk-I/O-Test | ✅ | 64 MB `dd if=/dev/zero ... bs=1M count=64 conv=fdatasync` (Schreiben), anschliessender Lesetest. Ueberspringbar mit `--skip-disk-test`. |
 | Redis `maxmemory` | ✅ | 10 % des gesamten RAM, min. 32 MB, max. 1024 MB, zusaetzlich auf 50 % des *verfuegbaren* RAMs gedeckelt. |
 | Redis `maxmemory-policy` | ✅ | `noeviction` als sicherer Broker-Default (keine stillschweigend verlorenen Jobs). |
 | Redis `io-threads` | ✅ | 1 (<4 Kerne), 2 (4-7 Kerne), 4 (>=8 Kerne). |

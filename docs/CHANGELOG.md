@@ -2,6 +2,20 @@
 
 Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projekt folgt [Semantic Versioning](https://semver.org/lang/de/).
 
+## [2.3.2] – 2026-09-08
+
+### Redis-Entrypoint-Hotfix und Dokumentations-Konsolidierung
+
+- **Kritischer Fix `docker/redis-entrypoint.sh` (POSIX-sh):** Der Entrypoint nutzte Bash-Syntax (`#!/usr/bin/env bash`, Arrays, `[[ ... ]]`, `(( ... ))`, `=~`, `set -o pipefail`), wird in `docker-compose.yml` aber explizit mit `/bin/sh` auf dem Image `redis:7.4-alpine` gestartet, das nur BusyBox-`ash` ohne `bash` enthält. Der Entrypoint brach dadurch still ab, `redis-server` lief nie und `docker compose up` scheiterte mit `dependency failed to start: container t-bot-local-redis-1 is unhealthy`. Der Entrypoint ist nun vollständig POSIX-konform (Positionsparameter statt Arrays, `[ ... ]`-Tests, numerischer `-gt`-Vergleich, `tr -cd 0-9`-Parser für `REDIS_MAXMEMORY`-Werte wie `96mb`) und prüft `maxmemory-policy` gegen eine Allowlist (Injection-Schutz für die `redis-server`-Kommandozeile). Übernommen aus dem nie gemergten PR #2 (Commit `4ffa267`, Branch `arena/01a02633-t-bot-lokal`, Fork RG4all); verifiziert mit `sh`/`dash`/BusyBox-`ash` inkl. Tuning-Datei-, Fallback- und Policy-Allowlist-Szenarien.
+- **Changelog-Konsolidierung:** Die zwei parallelen `[2.3.0]`-Abschnitte (PR #1/`af4b81e` und `67c55a1`) sind zu einem Abschnitt mit zwei klar benannten Teilbereichen zusammengeführt; der `[2.3.1]`-Abschnitt nennt nun auch die reine Metadaten-Migration `0012`.
+- **Neue Datei `docs/ARENA_AI_PROMPTS.md`:** Vollständige, datengesteuerte Historie aller Arena-AI-Fixes und -Features aus den letzten 10 Commits und den PRs #1–#3 (mit Commit-Hashes, PR-Nummern und Dokumentationsstatus je Änderung).
+- **Neue Datei `README.md` im Projektstamm:** Nach dem Docs-Umzug (`e32b34e`, „move md to docs“) besaß das Repository keine Stamm-`README.md` mehr (leere GitHub-Projektseite); die neue Datei fasst Projekt, Schnellstart und alle Dokumentationspfade zusammen.
+- **Link-Reparaturen nach dem `docs/`-Umzug:** `docs/README.md` verlinkte `VERSION` und `render.worker.example.yaml` relativ, obwohl beide im Projektstamm liegen — korrigiert auf `../VERSION` und `../render.worker.example.yaml`.
+- **`docs/LOCAL_DEVELOPMENT.md`:** Die Service-Tabelle listete `web`, `backtest-worker`, `redis` und `postgres` doppelt mit widersprüchlichen Limits (Merge-Artefakt aus PR #1); zu einer konsistenten Tabelle mit hardwareabhängigen Limits und Compose-Defaults zusammengeführt. Beide Tuning-Pfade sind nun sauber getrennt dokumentiert: Shell-Pfad (`hardware-test.sh` über den Compose-`tuner`-Service) und Python-Pfad (`scripts/tune_local_hardware.py` über `scripts/setup_local.sh`).
+- **`docs/PEER_REVIEW.md`:** Disk-Benchmark fälschlich mit „256 MB `dd`“ beschrieben — tatsächlich misst `hardware-test.sh` mit 64 MB (`bs=1M count=64`); korrigiert. Review-Scope (`install.sh`/`hardware-test.sh`, v2.3.0) und Re-Validierung für 2.3.2 (POSIX-Entrypoint) im Kopf vermerkt.
+- **`docs/README.md`:** Veralteter Render-Branch `arena/01a01bc6-t-bot` auf `arena/t-bot-render` aktualisiert; Installer-Abdeckung präzisiert (`install.sh`: apt/pacman/dnf/yum; `scripts/install_system_dependencies.sh`: zusätzlich zypper/apk); doppelte „Danach: <http://localhost:8000/>“-Absätze zusammengeführt.
+- **Versionsköpfe angeglichen:** `MANUAL.md` auf 2.3.2 (Stand 8. September 2026); `BACKTESTING_STUDY.md` und `LOCAL_SETUP_PEER_REVIEW.md` tragen Scope-Vermerke mit Bestätigung für 2.3.2 (inhaltlich unverändert). Fußnoten-Vergleichslinks unten repariert und um alle Versionen ergänzt.
+
 ## [2.3.1] – 2026-08-22
 
 ### Indikator-Konsistenz, Tooltip-System und Behebung des /help/ 500-Fehlers
@@ -19,11 +33,16 @@ Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projek
   - Detaillierte mathematische Formeln und Bedeutungen für NDA, DVA, Beschleunigung, DeltaDelta und MVD.
 - **Diagramm- und Ergebnis-Labels:**
   - Plotly-Chart-Traces und Backtesting-Ergebnis-Strings zeigen jetzt lesbare, aussagekräftige Indikatornamen an.
+- **Migration `0012` (Metadaten only):** `verbose_name`/`help_text` aller `Configuration`-Felder vereinheitlicht (Basis für Tooltips und MANUAL-Matrix); keine Schemaänderung an Spalten oder Tabellen.
 - **Testabdeckung:** Unit- und Integrationstests für Handbuch-Rendering, Formular-Labels, Help-Texte, Indikatoren und Backtest-Zuordnung erweitert.
 
 ## [2.3.0] – 2026-08-22
 
-### Universelles Build-/Install-Skript und automatische Hardware-Optimierung
+### Portables, hardware-optimiertes Local Setup (Shell- und Python-Pfad)
+
+Diese Version vereint zwei parallel entwickelte Implementierungen: den Shell-basierten Installer mit Compose-Tuning (PR #1, `af4b81e`, gemergt als `94cc67a`) und den Python-basierten Host-Installer mit Hardware-Tuner (`67c55a1`). Beide Pfade sind im aktuellen Stand enthalten und ergänzen sich (siehe `README.md` und `LOCAL_DEVELOPMENT.md`).
+
+#### A. Universelles Build-/Install-Skript und automatische Hardware-Optimierung (PR #1)
 
 - `install.sh` ist das neue Distributions-agnostische Build- und Installationsskript. Es erkennt die Linux-Distribution über `/etc/os-release` (inkl. Fallbacks) und wählt automatisch den passenden Paketmanager: `apt` für Debian/Ubuntu, `pacman` für Arch/Manjaro, `dnf`/`yum` für RHEL/CentOS/Fedora/Rocky/Alma/Amazon Linux (mit automatischer EPEL-Aktivierung, wo Redis benötigt wird).
 - Vollständiges Paket-Mapping für Redis, Python 3, Build-Toolchain, PostgreSQL-Header und die nativen WeasyPrint/Pango/Harfbuzz-Laufzeitbibliotheken pro Paketmanager.
@@ -39,18 +58,17 @@ Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projek
 - ShellCheck 0.11.0 ist fehlerfrei für alle Produktiv- und Testskripte; `set -euo pipefail`, Input-Validierung, `mktemp`-Temporärdateien mit `trap`-Cleanup, keine Hardcoded-Credentials.
 - `README.md` um Abschnitte zur automatischen Installation, Hardware-Optimierung, Render-Simulation, Docker-Tuning-Fluss und Test-Ausführung erweitert.
 - `PEER_REVIEW.md` dokumentiert das Selbst-Review mit Checklisten für Sicherheit, Performance, Kompatibilität und Code-Qualität sowie das vollständige Paket-Mapping.
-## [2.3.0] – 2026-08-21
 
-### Distributions- und hardwareunabhängiges Local Setup
+#### B. Distributions- und hardwareunabhängiges Local Setup, Python-Pfad (`67c55a1`)
 
-- Automatischer Systeminstaller für apt, pacman, dnf/yum, zypper und apk einschließlich Debian/Ubuntu, Arch, Fedora/RHEL-Derivate, openSUSE und Alpine.
+- Automatischer Systeminstaller `scripts/install_system_dependencies.sh` für apt, pacman, dnf/yum, zypper und apk einschließlich Debian/Ubuntu, Arch, Fedora/RHEL-Derivate, openSUSE und Alpine.
 - Native Architekturerkennung für amd64, arm64, arm/v7, ppc64le und s390x.
 - Ein-Schritt-Setup `scripts/setup_local.sh` installiert bei Bedarf Docker, führt Hardwaretests durch, baut Images und startet den isolierten Stack.
-- Hardwareprobe misst CPU-Hashrate, RAM, freien Datenträger und fsync-Schreibrate; daraus werden CPU-/RAM-Grenzen, Redis-Maxmemory und PostgreSQL-Cachewerte generiert.
+- Hardwareprobe `scripts/tune_local_hardware.py` misst CPU-Hashrate, RAM, freien Datenträger und fsync-Schreibrate; daraus werden CPU-/RAM-Grenzen, Redis-Maxmemory und PostgreSQL-Cachewerte generiert.
 - Render-Free-Simulation ist standardmäßig deaktiviert und nur über `--render-free-simulation` aktivierbar.
 - Compose-PostgreSQL erhält begrenzte Verbindungen und hardwareabhängige Cacheparameter; Redis läuft mit hardwareabhängigem `maxmemory`.
 - Sicherheitsmodus 0600 für generierte `.env.local`, bestehende Secrets werden beim Retuning beibehalten.
-- Dry-Run-Tests für alle Paketmanager-Familien und deterministische Unit-Tests für Hardwareprofile ergänzt.
+- Dry-Run-Tests für alle Paketmanager-Familien und deterministische Unit-Tests für Hardwareprofile (`trading/tests/test_local_setup.py`) ergänzt; Befunde im `LOCAL_SETUP_PEER_REVIEW.md` dokumentiert.
 
 ## [2.2.0] – 2026-08-21
 
@@ -201,5 +219,14 @@ Alle relevanten Änderungen dieses Projekts werden hier dokumentiert. Das Projek
 - Parametrisierte Backtests mit Fortschritts-WebSocket.
 - Technische Strategieindikatoren: DA, NDA, vorherige NDA, DVA/Beschleunigung, DeltaDelta und MVD.
 
-[2.0.0]: https://github.com/Kryschuuu/t-bot/compare/4b38bd9...HEAD
+[2.3.2]: https://github.com/Kryschuuu/t-bot/compare/98c9af9...HEAD
+[2.3.1]: https://github.com/Kryschuuu/t-bot/compare/94cc67a...98c9af9
+[2.3.0]: https://github.com/Kryschuuu/t-bot/compare/639ed0d...94cc67a
+[2.2.0]: https://github.com/Kryschuuu/t-bot/compare/d3e7835...639ed0d
+[2.1.0]: https://github.com/Kryschuuu/t-bot/compare/35b104a...d3e7835
+[2.0.4]: https://github.com/Kryschuuu/t-bot/compare/9b245ce...35b104a
+[2.0.3]: https://github.com/Kryschuuu/t-bot/compare/371fe69...9b245ce
+[2.0.2]: https://github.com/Kryschuuu/t-bot/compare/aa33e68...371fe69
+[2.0.1]: https://github.com/Kryschuuu/t-bot/compare/cfe0cf4...aa33e68
+[2.0.0]: https://github.com/Kryschuuu/t-bot/compare/4b38bd9...cfe0cf4
 [1.3.0]: https://github.com/Kryschuuu/t-bot/commit/4b38bd9

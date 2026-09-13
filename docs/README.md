@@ -4,7 +4,7 @@ Django-/Channels-Anwendung für **Paper Trading**, Marktvisualisierung und param
 
 Binance-Kurse laufen über einen persistenten kombinierten WebSocket-Stream (kein REST-Polling/Request-Weight). BitMart Spot nutzt die aktuelle V3-Public-API; Bitunix Spot/Futures ist über öffentliche, defensiv gedrosselte Adapter integriert. Beim Speichern und Aktivieren werden alle Symbole live geprüft. Das Dashboard bietet paginierte Logs, PDF/HTML/CSV-Reports und einen doppelt bestätigten Kill-Switch.
 
-Ausführliche Bedienung, Indikatorformeln und Betriebsanweisungen stehen in [`MANUAL.md`](MANUAL.md) und werden in der App unter `/help/` angezeigt. Die lokale Docker-Umgebung ist in [`LOCAL_DEVELOPMENT.md`](LOCAL_DEVELOPMENT.md) dokumentiert; das Review steht in [`LOCAL_SETUP_PEER_REVIEW.md`](LOCAL_SETUP_PEER_REVIEW.md). Die Backtesting-Machbarkeitsstudie mit Architekturdiagramm und Lastmessung steht in [`BACKTESTING_STUDY.md`](BACKTESTING_STUDY.md); [`render.worker.example.yaml`](render.worker.example.yaml) ist die optionale Worker-Vorlage. Versionshistorie: [`CHANGELOG.md`](CHANGELOG.md). Aktuelle Version: [`VERSION`](VERSION).
+Ausführliche Bedienung, Indikatorformeln und Betriebsanweisungen stehen in [`MANUAL.md`](MANUAL.md) und werden in der App unter `/help/` angezeigt. Die lokale Docker-Umgebung ist in [`LOCAL_DEVELOPMENT.md`](LOCAL_DEVELOPMENT.md) dokumentiert; Reviews stehen in [`LOCAL_SETUP_PEER_REVIEW.md`](LOCAL_SETUP_PEER_REVIEW.md) und [`PEER_REVIEW.md`](PEER_REVIEW.md). Die Backtesting-Machbarkeitsstudie mit Architekturdiagramm und Lastmessung steht in [`BACKTESTING_STUDY.md`](BACKTESTING_STUDY.md); [`render.worker.example.yaml`](../render.worker.example.yaml) ist die optionale Worker-Vorlage. Versionshistorie: [`CHANGELOG.md`](CHANGELOG.md). Aktuelle Version: [`VERSION`](../VERSION). Alle Arena-AI-Fixes mit PR-/Commit-Referenzen: [`ARENA_AI_PROMPTS.md`](ARENA_AI_PROMPTS.md).
 
 ## Docker Compose (empfohlen)
 
@@ -25,15 +25,22 @@ berechneten Werten fuer `maxmemory`, `maxmemory-policy` und `io-threads`;
 Web/Worker/Beat uebernehmen die empfohlenen Werte fuer Worker-Threads,
 Connection-Pools und Speicher-Limits. Danach ist die App unter
 <http://localhost:8000/> erreichbar. Web, Worker, Redis und PostgreSQL
-laufen als getrennte, ressourcenbegrenzte Services.
-Danach: <http://localhost:8000/>. Web, Worker, Redis und PostgreSQL laufen als getrennte, automatisch dimensionierte Services. Render-Free-Simulation ist standardmäßig deaktiviert.
+laufen als getrennte, automatisch dimensionierte Services. Die
+Render-Free-Simulation ist standardmäßig deaktiviert (Opt-in via
+`scripts/setup_local.sh --render-free-simulation`).
 
 ## Lokal ohne Docker starten
 
 Das universelle Installationsskript erkennt die Linux-Distribution
-(Debian/Ubuntu via apt, Arch via pacman, RHEL/CentOS/Fedora via dnf/yum),
-installiert alle Systemabhaengigkeiten, richtet Redis als lokalen Service
-ein und erzeugt eine lokale Konfigurationsdatei:
+(Debian/Ubuntu via apt, Arch via pacman, RHEL/CentOS/Fedora/Rocky/Alma/Amazon
+Linux via dnf/yum mit automatischer EPEL-Aktivierung), installiert alle
+Systemabhaengigkeiten, richtet Redis als lokalen Service ein und erzeugt
+eine lokale Konfigurationsdatei:
+
+> Hinweis: Für openSUSE (zypper) und Alpine (apk) ist zusätzlich
+> `scripts/install_system_dependencies.sh` zuständig — es wird automatisch
+> von `scripts/setup_local.sh --install-deps` aufgerufen und erkennt alle
+> sechs Paketmanager-Familien (apt, pacman, dnf/yum, zypper, apk).
 
 ```bash
 ./install.sh                # automatische Erkennung Host/Container
@@ -110,7 +117,7 @@ pip-audit -r requirements.txt   # wenn pip-audit installiert ist
 
 `render.yaml` definiert einen Docker-Web-Service und PostgreSQL in Frankfurt. Der Container installiert die für PDF-Reports benötigten Systembibliotheken, wartet beim Start mit DNS-/Connection-Backoff auf PostgreSQL, führt Migrationen aus und startet Daphne auf `$PORT`.
 
-1. Branch `arena/01a01bc6-t-bot` zu GitHub pushen.
+1. Branch `arena/t-bot-render` zu GitHub pushen.
 2. In Render **New → Blueprint** wählen und dieses Repository verbinden.
 3. Blueprint anwenden. `SECRET_KEY`, `PASSPHRASE` und `DATABASE_URL` werden automatisch erzeugt/verknüpft.
 4. Die erzeugte `PASSPHRASE` unter **t-bot-web → Environment** anzeigen und sicher aufbewahren.
